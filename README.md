@@ -1,19 +1,19 @@
 # go-cachekit
 
-[![CI](https://github.com/takuya-go-kit/go-cachekit/actions/workflows/ci.yml/badge.svg)](https://github.com/takuya-go-kit/go-cachekit/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/takuya-go-kit/go-cachekit.svg)](https://pkg.go.dev/github.com/takuya-go-kit/go-cachekit)
-[![Go Report Card](https://goreportcard.com/badge/github.com/takuya-go-kit/go-cachekit)](https://goreportcard.com/report/github.com/takuya-go-kit/go-cachekit)
+[![CI](https://github.com/wahrwelt-kit/go-cachekit/actions/workflows/ci.yml/badge.svg)](https://github.com/wahrwelt-kit/go-cachekit/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/wahrwelt-kit/go-cachekit.svg)](https://pkg.go.dev/github.com/wahrwelt-kit/go-cachekit)
+[![Go Report Card](https://goreportcard.com/badge/github.com/wahrwelt-kit/go-cachekit)](https://goreportcard.com/report/github.com/wahrwelt-kit/go-cachekit)
 
 Redis-backed JSON cache, in-memory bounded cache, TTL single-value cache, key-value and pub/sub helpers.
 
 ## Install
 
 ```bash
-go get github.com/takuya-go-kit/go-cachekit
+go get github.com/wahrwelt-kit/go-cachekit
 ```
 
 ```go
-import "github.com/takuya-go-kit/go-cachekit"
+import "github.com/wahrwelt-kit/go-cachekit"
 ```
 
 ## API

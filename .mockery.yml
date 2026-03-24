@@ -5,7 +5,7 @@ log-level: info
 template: testify
 
 packages:
-  github.com/takuya-go-kit/go-cachekit:
+  github.com/wahrwelt-kit/go-cachekit:
     interfaces:
       KeyValueStore:
         config:
