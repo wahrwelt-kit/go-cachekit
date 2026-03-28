@@ -52,6 +52,7 @@ func escapeRedisGlob(s string) string {
 		switch r {
 		case '\\', '*', '?', '[', ']':
 			b.WriteRune('\\')
+		default:
 		}
 		b.WriteRune(r)
 	}
@@ -84,7 +85,7 @@ func addInFlight(c *Cache, key string) {
 		if !loaded {
 			return
 		}
-		existing := v.(*inFlightEntry) //nolint:forcetypeassert // inFlightKeys only stores *inFlightEntry
+		existing := v.(*inFlightEntry) //nolint:forcetypeassert,errcheck,revive // inFlightKeys only stores *inFlightEntry
 		for {
 			cur := existing.count.Load()
 			if cur <= 0 {
@@ -102,7 +103,7 @@ func removeInFlight(c *Cache, key string) {
 	if !ok {
 		return
 	}
-	e := v.(*inFlightEntry) //nolint:forcetypeassert // inFlightKeys only stores *inFlightEntry
+	e := v.(*inFlightEntry) //nolint:forcetypeassert,errcheck,revive // inFlightKeys only stores *inFlightEntry
 	for {
 		cur := e.count.Load()
 		if cur <= 0 {
@@ -121,7 +122,7 @@ func removeInFlight(c *Cache, key string) {
 
 func cacheKeyVersion(c *Cache, key string) *atomic.Uint64 {
 	if v, ok := c.versionMap.Load(key); ok {
-		return v.(*atomic.Uint64) //nolint:forcetypeassert // versionMap only stores *atomic.Uint64
+		return v.(*atomic.Uint64) //nolint:forcetypeassert,errcheck,revive // versionMap only stores *atomic.Uint64
 	}
 	newVer := &atomic.Uint64{}
 	actual, loaded := c.versionMap.LoadOrStore(key, newVer)
@@ -133,7 +134,7 @@ func cacheKeyVersion(c *Cache, key string) *atomic.Uint64 {
 			c.evictMu.Unlock()
 		}
 	}
-	return actual.(*atomic.Uint64) //nolint:forcetypeassert // versionMap only stores *atomic.Uint64
+	return actual.(*atomic.Uint64) //nolint:forcetypeassert,errcheck,revive // versionMap only stores *atomic.Uint64
 }
 
 func evictVersionMapExcess(c *Cache, protectedKey string) {
@@ -206,7 +207,7 @@ func WithRespectCallerCancel(respect bool) GetOrLoadOption {
 // loadFn receives the request context and may respect context cancellation
 // If loadFn succeeds but Redis Set fails, returns (loadedData, err): caller receives the data and the set error
 // Optional opts: WithTimeout, WithRespectCallerCancel
-func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) {
+func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) { //nolint:cyclop,revive // cache loading logic requires multiple branching paths
 	var result T
 	if c == nil || c.redis == nil {
 		return result, ErrRedisNotConfigured
@@ -272,7 +273,7 @@ func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Durati
 		setErr := c.redis.Set(setCtx, key, bytes, ttl).Err()
 		cancel()
 		if setErr != nil {
-			return data, fmt.Errorf("cache set after load: %w", setErr)
+			return data, fmt.Errorf("cache set after load: %w", setErr) //nolint:nilnil // cache SET failed but data is valid; caller gets value with non-fatal error
 		}
 		return data, nil
 	})

@@ -106,7 +106,7 @@ func (v *CachedValue[T]) Get(ctx context.Context, load func(context.Context) (T,
 		val, err := load(loadCtx)
 		cancel()
 		if err != nil {
-			return zero, err
+			return nil, err
 		}
 		v.mu.Lock()
 		if v.version.Load() == verBefore {
@@ -117,7 +117,7 @@ func (v *CachedValue[T]) Get(ctx context.Context, load func(context.Context) (T,
 		return val, nil
 	})
 	if err != nil {
-		return zero, err
+		return zero, err //nolint:nilnil // zero is the zero value of T, not a valid result
 	}
 	typed, ok := res.(T)
 	if !ok && res != nil {

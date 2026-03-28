@@ -15,7 +15,8 @@ import (
 func NewMockPubSubStore(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockPubSubStore {
+},
+) *MockPubSubStore {
 	mock := &MockPubSubStore{}
 	mock.Mock.Test(t)
 

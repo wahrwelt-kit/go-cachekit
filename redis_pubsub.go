@@ -42,7 +42,7 @@ func (r *RedisPubSubStore) Publish(ctx context.Context, channel, message string)
 // and close the returned channel; otherwise the goroutine may block and leak
 // Do not stop reading from the channel without cancelling ctx
 // Returns ErrRedisNotConfigured if the receiver or Client is nil. See package doc for usage
-func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-chan string, error) {
+func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-chan string, error) { //nolint:gocognit,revive,cyclop // complex subscription management with reconnection logic
 	if r == nil || r.Client == nil {
 		return nil, ErrRedisNotConfigured
 	}

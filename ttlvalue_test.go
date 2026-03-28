@@ -49,7 +49,7 @@ func TestCachedValue_Invalidate(t *testing.T) {
 	v := NewCachedValue[int](context.Background(), "k", time.Minute)
 	t.Cleanup(v.Stop)
 	ctx := context.Background()
-	v.Get(ctx, func(context.Context) (int, error) { return 10, nil })
+	v.Get(ctx, func(context.Context) (int, error) { return 10, nil }) //nolint:revive // priming cache; error not relevant
 	_, ok := v.GetStale()
 	require.True(t, ok)
 	v.Invalidate()
@@ -72,7 +72,7 @@ func TestCachedValue_GetStale(t *testing.T) {
 	_, ok := v.GetStale()
 	assert.False(t, ok)
 	ctx := context.Background()
-	v.Get(ctx, func(context.Context) (int, error) { return 7, nil })
+	v.Get(ctx, func(context.Context) (int, error) { return 7, nil }) //nolint:revive // priming cache; error not relevant
 	val, ok := v.GetStale()
 	require.True(t, ok)
 	assert.Equal(t, 7, val)

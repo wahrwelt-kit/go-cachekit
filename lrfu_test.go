@@ -235,16 +235,14 @@ func TestLRFUCache_Concurrent(t *testing.T) {
 	c := NewLRFUCache[int, int](100)
 	var wg sync.WaitGroup
 	for i := range 100 {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			c.Set(n, n*2)
-			c.Get(n)
-			c.Peek(n)
-			if n%3 == 0 {
-				c.Delete(n)
+		wg.Go(func() {
+			c.Set(i, i*2)
+			c.Get(i)
+			c.Peek(i)
+			if i%3 == 0 {
+				c.Delete(i)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	assert.LessOrEqual(t, c.Len(), 100)

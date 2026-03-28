@@ -16,7 +16,8 @@ import (
 func NewMockKeyValueStore(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockKeyValueStore {
+},
+) *MockKeyValueStore {
 	mock := &MockKeyValueStore{}
 	mock.Mock.Test(t)
 
