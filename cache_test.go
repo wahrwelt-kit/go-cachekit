@@ -97,7 +97,7 @@ func TestGetOrLoad_EmptyKey(t *testing.T) {
 	ctx := context.Background()
 	_, err := GetOrLoad(c, ctx, "", time.Minute, func(context.Context) (int, error) { return 0, nil })
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-empty")
+	assert.ErrorIs(t, err, ErrEmptyKey)
 }
 
 func TestGetOrLoad_ZeroTTL(t *testing.T) {
@@ -107,7 +107,7 @@ func TestGetOrLoad_ZeroTTL(t *testing.T) {
 	ctx := context.Background()
 	_, err := GetOrLoad(c, ctx, "k", 0, func(context.Context) (int, error) { return 0, nil })
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ttl")
+	assert.ErrorIs(t, err, ErrInvalidTTL)
 }
 
 func TestGetOrLoad_LoadError(t *testing.T) {
@@ -182,7 +182,7 @@ func TestSet_EmptyKey(t *testing.T) {
 	ctx := context.Background()
 	err := c.Set(ctx, "", 1, time.Second)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-empty")
+	assert.ErrorIs(t, err, ErrEmptyKey)
 }
 
 func TestSet_ZeroTTL(t *testing.T) {
@@ -192,7 +192,7 @@ func TestSet_ZeroTTL(t *testing.T) {
 	ctx := context.Background()
 	err := c.Set(ctx, "k", 1, 0)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ttl")
+	assert.ErrorIs(t, err, ErrInvalidTTL)
 }
 
 func TestDeleteByPrefix_EmptyPrefix(t *testing.T) {
@@ -202,7 +202,7 @@ func TestDeleteByPrefix_EmptyPrefix(t *testing.T) {
 	ctx := context.Background()
 	err := c.DeleteByPrefix(ctx, "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix")
+	assert.ErrorIs(t, err, ErrEmptyPrefix)
 }
 
 func TestNew_NilOption(t *testing.T) {

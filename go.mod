@@ -1,6 +1,6 @@
 module github.com/wahrwelt-kit/go-cachekit
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/go-redis/redismock/v9 v9.2.0

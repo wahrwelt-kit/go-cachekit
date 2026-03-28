@@ -3,7 +3,6 @@ package cachekit
 import (
 	"context"
 	"crypto/tls"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,7 +13,7 @@ func TestNewRedisClient_Error(t *testing.T) {
 	t.Parallel()
 	_, err := NewRedisClient(context.Background(), &RedisConfig{Host: "127.0.0.1", Port: 1})
 	require.Error(t, err)
-	require.True(t, strings.Contains(err.Error(), "redis connection failed"))
+	require.Contains(t, err.Error(), "redis connection failed")
 }
 
 func TestNewRedisClient_NilConfig(t *testing.T) {

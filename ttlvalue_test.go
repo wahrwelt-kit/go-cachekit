@@ -116,7 +116,7 @@ func TestNewCachedValueE_EmptyKey(t *testing.T) {
 	t.Parallel()
 	_, err := NewCachedValueE[int](context.Background(), "", time.Minute)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "non-empty")
+	assert.ErrorIs(t, err, ErrEmptyKey)
 }
 
 func TestCachedValue_Stop_DoubleCall(t *testing.T) {

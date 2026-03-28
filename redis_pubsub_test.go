@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRedisPubSubStore_NilClient_Publish(t *testing.T) {
@@ -20,7 +21,7 @@ func TestRedisPubSubStore_NilClient_Subscribe(t *testing.T) {
 	ctx := context.Background()
 	s := &RedisPubSubStore{}
 	ch, err := s.Subscribe(ctx, "ch")
-	assert.ErrorIs(t, err, ErrRedisNotConfigured)
+	require.ErrorIs(t, err, ErrRedisNotConfigured)
 	assert.Nil(t, ch)
 }
 
@@ -35,6 +36,6 @@ func TestRedisPubSubStore_NilReceiver_Subscribe(t *testing.T) {
 	t.Parallel()
 	var s *RedisPubSubStore
 	ch, err := s.Subscribe(context.Background(), "ch")
-	assert.ErrorIs(t, err, ErrRedisNotConfigured)
+	require.ErrorIs(t, err, ErrRedisNotConfigured)
 	assert.Nil(t, ch)
 }

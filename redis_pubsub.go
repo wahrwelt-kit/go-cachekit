@@ -8,27 +8,27 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// OnDropFunc is called when a message is dropped because SendTimeout was exceeded.
-// Return quickly to avoid blocking the subscribe loop. Optional; nil means no callback.
+// OnDropFunc is called when a message is dropped because SendTimeout was exceeded
+// Return quickly to avoid blocking the subscribe loop. Optional; nil means no callback
 type OnDropFunc func(channel, payload string)
 
-// RedisPubSubStore implements PubSubStore using a Redis client. Client must be non-nil.
+// RedisPubSubStore implements PubSubStore using a Redis client. Client must be non-nil
 type RedisPubSubStore struct {
-	// Client is the Redis client used for Publish and Subscribe. Must not be nil.
+	// Client is the Redis client used for Publish and Subscribe. Must not be nil
 	Client *redis.Client
-	// ChanBufferSize is the buffer size for the channel returned by Subscribe;
-	// zero or negative uses 64.
+	// ChanBufferSize is the buffer size for the channel returned by Subscribe
+	// zero or negative uses 64
 	ChanBufferSize int
-	// SendTimeout limits how long the subscribe goroutine waits to send a message;
-	// when exceeded, the message is dropped and OnDrop is called if set. Zero uses 30s.
+	// SendTimeout limits how long the subscribe goroutine waits to send a message
+	// when exceeded, the message is dropped and OnDrop is called if set. Zero uses 30s
 	SendTimeout time.Duration
-	// OnDrop is called when a message is dropped due to SendTimeout; nil disables the callback.
+	// OnDrop is called when a message is dropped due to SendTimeout; nil disables the callback
 	OnDrop OnDropFunc
 }
 
 var _ PubSubStore = (*RedisPubSubStore)(nil)
 
-// Publish sends message to the given channel. Returns ErrRedisNotConfigured if the receiver or Client is nil.
+// Publish sends message to the given channel. Returns ErrRedisNotConfigured if the receiver or Client is nil
 func (r *RedisPubSubStore) Publish(ctx context.Context, channel, message string) error {
 	if r == nil || r.Client == nil {
 		return ErrRedisNotConfigured
@@ -36,12 +36,12 @@ func (r *RedisPubSubStore) Publish(ctx context.Context, channel, message string)
 	return r.Client.Publish(ctx, channel, message).Err()
 }
 
-// Subscribe returns a channel that receives messages published to the given channel.
-// A background goroutine reads from Redis until ctx is cancelled.
+// Subscribe returns a channel that receives messages published to the given channel
+// A background goroutine reads from Redis until ctx is cancelled
 // Caller must cancel ctx when done (e.g. defer cancel()) to release the goroutine
-// and close the returned channel; otherwise the goroutine may block and leak.
-// Do not stop reading from the channel without cancelling ctx.
-// Returns ErrRedisNotConfigured if the receiver or Client is nil. See package doc for usage.
+// and close the returned channel; otherwise the goroutine may block and leak
+// Do not stop reading from the channel without cancelling ctx
+// Returns ErrRedisNotConfigured if the receiver or Client is nil. See package doc for usage
 func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-chan string, error) {
 	if r == nil || r.Client == nil {
 		return nil, ErrRedisNotConfigured
@@ -63,7 +63,7 @@ func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-cha
 	onDrop := r.OnDrop
 	go func() {
 		defer close(out)
-		defer pubsub.Close()
+		defer func() { _ = pubsub.Close() }()
 		var timer *time.Timer
 		for {
 			select {

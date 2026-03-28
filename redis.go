@@ -10,31 +10,31 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisConfig holds connection and pool settings for NewRedisClient.
-// Host and Port are required. Use String() or GoString() when logging to avoid exposing Password.
+// RedisConfig holds connection and pool settings for NewRedisClient
+// Host and Port are required. Use String() or GoString() when logging to avoid exposing Password
 type RedisConfig struct {
-	// Host is the Redis server hostname or IP (required).
+	// Host is the Redis server hostname or IP (required)
 	Host string
-	// Port is the Redis server port; must be in range 1-65535 (required).
+	// Port is the Redis server port; must be in range 1-65535 (required)
 	Port int
-	// Password is the optional Redis auth password. Do not log; use GoString() for debug output.
+	// Password is the optional Redis auth password. Do not log; use GoString() for debug output
 	Password string
-	// DB is the Redis database number; 0 is the default database.
+	// DB is the Redis database number; 0 is the default database
 	DB int
-	// PoolSize is the maximum number of socket connections in the pool; zero uses default (50).
+	// PoolSize is the maximum number of socket connections in the pool; zero uses default (50)
 	PoolSize int
-	// MinIdleConns is the minimum number of idle connections; zero uses default (10).
+	// MinIdleConns is the minimum number of idle connections; zero uses default (10)
 	MinIdleConns int
-	// TLSConfig, when non-nil, enables TLS for the connection.
+	// TLSConfig, when non-nil, enables TLS for the connection
 	TLSConfig *tls.Config
 }
 
-// String implements fmt.Stringer. Returns a safe representation that does not include Password (use for %v, %s in logs).
+// String implements fmt.Stringer. Returns a safe representation that does not include Password (use for %v, %s in logs)
 func (c RedisConfig) String() string {
 	return c.GoString()
 }
 
-// GoString implements fmt.GoStringer. Returns a safe representation that does not include Password (use for %#v in logs).
+// GoString implements fmt.GoStringer. Returns a safe representation that does not include Password (use for %#v in logs)
 func (c RedisConfig) GoString() string {
 	tlsStr := "nil"
 	if c.TLSConfig != nil {
@@ -53,8 +53,8 @@ const (
 	redisDefaultIdle  = 10
 )
 
-// NewRedisClient creates a Redis client from cfg and verifies connectivity with Ping.
-// Returns the client on success. Returns an error if cfg is invalid (use ErrRedisConfigNil, ErrRedisHostRequired, ErrRedisInvalidPort) or if the server is unreachable. Ping uses the shorter of ctx's deadline and an internal timeout; ctx cancellation aborts the ping. Caller must call Close() on the returned client when done.
+// NewRedisClient creates a Redis client from cfg and verifies connectivity with Ping
+// Returns the client on success. Returns an error if cfg is invalid (use ErrRedisConfigNil, ErrRedisHostRequired, ErrRedisInvalidPort) or if the server is unreachable. Ping uses the shorter of ctx's deadline and an internal timeout; ctx cancellation aborts the ping. Caller must call Close() on the returned client when done
 func NewRedisClient(ctx context.Context, cfg *RedisConfig) (*redis.Client, error) {
 	if cfg == nil {
 		return nil, ErrRedisConfigNil
@@ -93,7 +93,7 @@ func NewRedisClient(ctx context.Context, cfg *RedisConfig) (*redis.Client, error
 
 	if err := rdb.Ping(pingCtx).Err(); err != nil {
 		if closeErr := rdb.Close(); closeErr != nil {
-			return nil, fmt.Errorf("redis connection failed: %w (close: %v)", err, closeErr)
+			return nil, fmt.Errorf("redis connection failed: %w (close: %w)", err, closeErr)
 		}
 		return nil, fmt.Errorf("redis connection failed: %w", err)
 	}

@@ -1,4 +1,4 @@
-.PHONY: test test-race test-bench test-integration fmt vet mockery cover tidy
+.PHONY: test test-race test-bench test-integration fmt vet lint mockery cover tidy
 
 test:
 	go test ./...
@@ -18,6 +18,9 @@ fmt:
 
 vet:
 	go vet ./...
+
+lint:
+	golangci-lint run --fix ./...
 
 mockery:
 	mockery --config .mockery.yml

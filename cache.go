@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,10 +25,10 @@ type inFlightEntry struct {
 	count atomic.Int32
 }
 
-// Cache provides Redis-backed JSON get/set with singleflight for GetOrLoad.
-// Use each key with a single type T; mixing types for the same key causes errors.
-// Del and DeleteByPrefix increment a per-key version; an in-flight load that finishes after Del will not write back.
-// Key versions are stored in a sync.Map. When the map size exceeds max entries (default 65536), excess entries are evicted (no ordering guarantee). Keys currently in flight for GetOrLoad are never evicted. Set WithMaxVersionMapEntries(0) for no limit (not recommended for long-lived instances).
+// Cache provides Redis-backed JSON get/set with singleflight for GetOrLoad
+// Use each key with a single type T; mixing types for the same key causes errors
+// Del and DeleteByPrefix increment a per-key version; an in-flight load that finishes after Del will not write back
+// Key versions are stored in a sync.Map. When the map size exceeds max entries (default 65536), excess entries are evicted (no ordering guarantee). Keys currently in flight for GetOrLoad are never evicted. Set WithMaxVersionMapEntries(0) for no limit (not recommended for long-lived instances)
 type Cache struct {
 	redis                *redis.Client
 	sf                   singleflight.Group
@@ -38,11 +39,15 @@ type Cache struct {
 	evictMu              sync.Mutex
 }
 
-// CacheOption configures a Cache at construction (e.g. WithMaxVersionMapEntries). Nil options are ignored.
+// CacheOption configures a Cache at construction (e.g. WithMaxVersionMapEntries). Nil options are ignored
 type CacheOption func(*Cache)
 
 func escapeRedisGlob(s string) string {
+	if !strings.ContainsAny(s, `\*?[]`) {
+		return s
+	}
 	var b strings.Builder
+	b.Grow(len(s) + 4)
 	for _, r := range s {
 		switch r {
 		case '\\', '*', '?', '[', ']':
@@ -53,14 +58,14 @@ func escapeRedisGlob(s string) string {
 	return b.String()
 }
 
-// WithMaxVersionMapEntries limits the in-memory version map size; when exceeded, excess entries are evicted in no particular order. Zero means no limit (not recommended for long-lived processes). Default is 65536.
+// WithMaxVersionMapEntries limits the in-memory version map size; when exceeded, excess entries are evicted in no particular order. Zero means no limit (not recommended for long-lived processes). Default is 65536
 func WithMaxVersionMapEntries(n int) CacheOption {
 	return func(c *Cache) {
 		c.maxVersionMapEntries = n
 	}
 }
 
-// New returns a Cache that uses the given Redis client for JSON get/set and singleflight. opts configure the cache (e.g. WithMaxVersionMapEntries). Nil options are ignored.
+// New returns a Cache that uses the given Redis client for JSON get/set and singleflight. opts configure the cache (e.g. WithMaxVersionMapEntries). Nil options are ignored
 func New(redis *redis.Client, opts ...CacheOption) *Cache {
 	c := &Cache{redis: redis, maxVersionMapEntries: defaultMaxVersionMapEntries}
 	for _, opt := range opts {
@@ -79,7 +84,7 @@ func addInFlight(c *Cache, key string) {
 		if !loaded {
 			return
 		}
-		existing := v.(*inFlightEntry)
+		existing := v.(*inFlightEntry) //nolint:forcetypeassert // inFlightKeys only stores *inFlightEntry
 		for {
 			cur := existing.count.Load()
 			if cur <= 0 {
@@ -97,7 +102,7 @@ func removeInFlight(c *Cache, key string) {
 	if !ok {
 		return
 	}
-	e := v.(*inFlightEntry)
+	e := v.(*inFlightEntry) //nolint:forcetypeassert // inFlightKeys only stores *inFlightEntry
 	for {
 		cur := e.count.Load()
 		if cur <= 0 {
@@ -116,7 +121,7 @@ func removeInFlight(c *Cache, key string) {
 
 func cacheKeyVersion(c *Cache, key string) *atomic.Uint64 {
 	if v, ok := c.versionMap.Load(key); ok {
-		return v.(*atomic.Uint64)
+		return v.(*atomic.Uint64) //nolint:forcetypeassert // versionMap only stores *atomic.Uint64
 	}
 	newVer := &atomic.Uint64{}
 	actual, loaded := c.versionMap.LoadOrStore(key, newVer)
@@ -128,7 +133,7 @@ func cacheKeyVersion(c *Cache, key string) *atomic.Uint64 {
 			c.evictMu.Unlock()
 		}
 	}
-	return actual.(*atomic.Uint64)
+	return actual.(*atomic.Uint64) //nolint:forcetypeassert // versionMap only stores *atomic.Uint64
 }
 
 func evictVersionMapExcess(c *Cache, protectedKey string) {
@@ -169,18 +174,18 @@ func evictVersionMapExcess(c *Cache, protectedKey string) {
 	}
 }
 
-// GetOrLoadOpts holds options for GetOrLoad. Use WithTimeout and WithRespectCallerCancel to configure.
+// GetOrLoadOpts holds options for GetOrLoad. Use WithTimeout and WithRespectCallerCancel to configure
 type GetOrLoadOpts struct {
-	// Timeout is the context timeout for the load function and for Redis Set (default 30s). Must be positive.
+	// Timeout is the context timeout for the load function and for Redis Set (default 30s). Must be positive
 	Timeout time.Duration
-	// RespectCallerCancel, when true, passes the caller's context to loadFn so cancellation aborts the load; when false, loadFn runs with context.WithoutCancel so it can finish and write back.
+	// RespectCallerCancel, when true, passes the caller's context to loadFn so cancellation aborts the load; when false, loadFn runs with context.WithoutCancel so it can finish and write back
 	RespectCallerCancel bool
 }
 
-// GetOrLoadOption configures GetOrLoad (e.g. WithTimeout, WithRespectCallerCancel). Nil options are ignored.
+// GetOrLoadOption configures GetOrLoad (e.g. WithTimeout, WithRespectCallerCancel). Nil options are ignored
 type GetOrLoadOption func(*GetOrLoadOpts)
 
-// WithTimeout sets the context timeout for the load function and for Redis Set in GetOrLoad. Default is 30s. Only positive values are applied.
+// WithTimeout sets the context timeout for the load function and for Redis Set in GetOrLoad. Default is 30s. Only positive values are applied
 func WithTimeout(d time.Duration) GetOrLoadOption {
 	return func(o *GetOrLoadOpts) {
 		if d > 0 {
@@ -189,18 +194,18 @@ func WithTimeout(d time.Duration) GetOrLoadOption {
 	}
 }
 
-// WithRespectCallerCancel controls whether loadFn in GetOrLoad receives the caller's context. When true, loadFn sees cancellation; when false (default), loadFn runs with context.WithoutCancel so it can finish and write the result to Redis even if the caller cancels.
+// WithRespectCallerCancel controls whether loadFn in GetOrLoad receives the caller's context. When true, loadFn sees cancellation; when false (default), loadFn runs with context.WithoutCancel so it can finish and write the result to Redis even if the caller cancels
 func WithRespectCallerCancel(respect bool) GetOrLoadOption {
 	return func(o *GetOrLoadOpts) { o.RespectCallerCancel = respect }
 }
 
-// GetOrLoad returns the cached value for key or calls loadFn, stores the result with ttl, and returns it.
-// Key must be non-empty. Use the same key only with one type T; otherwise concurrent calls with different T may get a type error.
-// Del and DeleteByPrefix increment the key version so an in-flight load that completes after delete will not overwrite.
-// There is a small TOCTOU window between the version check and Redis Set—a concurrent Del in that window may be overwritten by a stale Set; consistency is best-effort and TTL limits staleness.
-// loadFn receives the request context and may respect context cancellation.
-// If loadFn succeeds but Redis Set fails, returns (loadedData, err): caller receives the data and the set error.
-// Optional opts: WithTimeout, WithRespectCallerCancel.
+// GetOrLoad returns the cached value for key or calls loadFn, stores the result with ttl, and returns it
+// Key must be non-empty. Use the same key only with one type T; otherwise concurrent calls with different T may get a type error
+// Del and DeleteByPrefix increment the key version so an in-flight load that completes after delete will not overwrite
+// There is a small TOCTOU window between the version check and Redis Set-a concurrent Del in that window may be overwritten by a stale Set; consistency is best-effort and TTL limits staleness
+// loadFn receives the request context and may respect context cancellation
+// If loadFn succeeds but Redis Set fails, returns (loadedData, err): caller receives the data and the set error
+// Optional opts: WithTimeout, WithRespectCallerCancel
 func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) {
 	var result T
 	if c == nil || c.redis == nil {
@@ -231,7 +236,7 @@ func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Durati
 			delErr := c.redis.Del(ctx, key).Err()
 			var zero T
 			if delErr != nil {
-				return zero, fmt.Errorf("cache get unmarshal: %w (del failed: %v)", unmarshalErr, delErr)
+				return zero, fmt.Errorf("cache get unmarshal: %w (del failed: %w)", unmarshalErr, delErr)
 			}
 			return zero, fmt.Errorf("cache get unmarshal: %w", unmarshalErr)
 		}
@@ -287,8 +292,8 @@ func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Durati
 	return cached, nil
 }
 
-// Del deletes the given keys from Redis and forgets them in singleflight so subsequent GetOrLoad will reload.
-// All keys must be non-empty. Returns ErrRedisNotConfigured if the cache has no Redis client, ErrEmptyKey if any key is empty.
+// Del deletes the given keys from Redis and forgets them in singleflight so subsequent GetOrLoad will reload
+// All keys must be non-empty. Returns ErrRedisNotConfigured if the cache has no Redis client, ErrEmptyKey if any key is empty
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if c == nil || c.redis == nil {
 		return ErrRedisNotConfigured
@@ -296,10 +301,8 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	for _, key := range keys {
-		if key == "" {
-			return ErrEmptyKey
-		}
+	if slices.Contains(keys, "") {
+		return ErrEmptyKey
 	}
 	for _, key := range keys {
 		c.sf.Forget(key)
@@ -308,9 +311,9 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	return c.redis.Del(ctx, keys...).Err()
 }
 
-// Set marshals value as JSON and stores it in Redis with the given ttl.
-// Key must be non-empty; ttl must be positive. Also forgets the key in singleflight and increments the per-key version.
-// Returns ErrRedisNotConfigured, ErrEmptyKey, or ErrInvalidTTL on invalid input; errors from Redis are wrapped.
+// Set marshals value as JSON and stores it in Redis with the given ttl
+// Key must be non-empty; ttl must be positive. Also forgets the key in singleflight and increments the per-key version
+// Returns ErrRedisNotConfigured, ErrEmptyKey, or ErrInvalidTTL on invalid input; errors from Redis are wrapped
 func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duration) error {
 	if c == nil || c.redis == nil {
 		return ErrRedisNotConfigured
@@ -335,9 +338,9 @@ func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duratio
 
 const deleteByPrefixBatchSize = 500
 
-// DeleteByPrefix scans keys matching prefix* and Unlinks them in Redis, and forgets each key in singleflight.
-// prefix must be non-empty; Redis glob characters in prefix are escaped. maxIterations is optional (variadic): pass one positive int to cap SCAN iterations and avoid blocking; 0 or omitted means no limit.
-// Returns ErrRedisNotConfigured or ErrEmptyPrefix on invalid input; scan/unlink errors are wrapped.
+// DeleteByPrefix scans keys matching prefix* and Unlinks them in Redis, and forgets each key in singleflight
+// prefix must be non-empty; Redis glob characters in prefix are escaped. maxIterations is optional (variadic): pass one positive int to cap SCAN iterations and avoid blocking; 0 or omitted means no limit
+// Returns ErrRedisNotConfigured or ErrEmptyPrefix on invalid input; scan/unlink errors are wrapped
 func (c *Cache) DeleteByPrefix(ctx context.Context, prefix string, maxIterations ...int) error {
 	if c == nil || c.redis == nil {
 		return ErrRedisNotConfigured
@@ -352,10 +355,7 @@ func (c *Cache) DeleteByPrefix(ctx context.Context, prefix string, maxIterations
 	match := escapeRedisGlob(prefix) + "*"
 	var cursor uint64
 	iterations := 0
-	for {
-		if limit > 0 && iterations >= limit {
-			break
-		}
+	for limit == 0 || iterations < limit {
 		keys, nextCursor, err := c.redis.Scan(ctx, cursor, match, deleteByPrefixBatchSize).Result()
 		if err != nil {
 			return fmt.Errorf("cache delete by prefix scan: %w", err)
