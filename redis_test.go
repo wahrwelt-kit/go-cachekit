@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testHostLocalhost = "localhost"
+
 func TestNewRedisClient_Error(t *testing.T) {
 	t.Parallel()
 	_, err := NewRedisClient(context.Background(), &RedisConfig{Host: "127.0.0.1", Port: 1})
@@ -41,7 +43,7 @@ func TestNewRedisClient_InvalidPort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NewRedisClient(context.Background(), &RedisConfig{Host: "localhost", Port: tt.port})
+			_, err := NewRedisClient(context.Background(), &RedisConfig{Host: testHostLocalhost, Port: tt.port})
 			require.Error(t, err)
 			assert.ErrorIs(t, err, ErrRedisInvalidPort)
 		})
@@ -50,32 +52,32 @@ func TestNewRedisClient_InvalidPort(t *testing.T) {
 
 func TestRedisConfig_String(t *testing.T) {
 	t.Parallel()
-	cfg := RedisConfig{Host: "localhost", Port: 6379, Password: "secret", DB: 0}
+	cfg := RedisConfig{Host: testHostLocalhost, Port: 6379, Password: "secret", DB: 0}
 	s := cfg.String()
-	assert.Contains(t, s, "localhost")
+	assert.Contains(t, s, testHostLocalhost)
 	assert.Contains(t, s, "***")
 	assert.NotContains(t, s, "secret")
 }
 
 func TestRedisConfig_GoString(t *testing.T) {
 	t.Parallel()
-	cfg := RedisConfig{Host: "localhost", Port: 6379, Password: "secret", DB: 0}
+	cfg := RedisConfig{Host: testHostLocalhost, Port: 6379, Password: "secret", DB: 0}
 	s := cfg.GoString()
-	assert.Contains(t, s, "localhost")
+	assert.Contains(t, s, testHostLocalhost)
 	assert.Contains(t, s, "***")
 	assert.NotContains(t, s, "secret")
 }
 
 func TestRedisConfig_GoString_WithTLS(t *testing.T) {
 	t.Parallel()
-	cfg := RedisConfig{Host: "localhost", Port: 6379, TLSConfig: &tls.Config{}}
+	cfg := RedisConfig{Host: testHostLocalhost, Port: 6379, TLSConfig: &tls.Config{}}
 	s := cfg.GoString()
 	assert.Contains(t, s, "non-nil")
 }
 
 func TestRedisConfig_GoString_NilTLS(t *testing.T) {
 	t.Parallel()
-	cfg := RedisConfig{Host: "localhost", Port: 6379}
+	cfg := RedisConfig{Host: testHostLocalhost, Port: 6379}
 	s := cfg.GoString()
 	assert.Contains(t, s, "nil")
 }
