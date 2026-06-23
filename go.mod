@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/go-redis/redismock/v9 v9.2.0
-	github.com/jellydator/ttlcache/v3 v3.4.0
+	github.com/jellydator/ttlcache/v3 v3.4.1
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/redis v0.43.0
