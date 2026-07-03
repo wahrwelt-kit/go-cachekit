@@ -8,13 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/go-redis/redismock/v9"
-	"github.com/redis/go-redis/v9"
 )
 
 func BenchmarkAddRemoveInFlight(b *testing.B) {
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(b)
 	c := New(client)
 	for b.Loop() {
 		addInFlight(c, "key")
@@ -23,7 +20,7 @@ func BenchmarkAddRemoveInFlight(b *testing.B) {
 }
 
 func BenchmarkAddRemoveInFlight_Parallel(b *testing.B) {
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(b)
 	c := New(client)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -34,7 +31,7 @@ func BenchmarkAddRemoveInFlight_Parallel(b *testing.B) {
 }
 
 func BenchmarkCacheKeyVersion(b *testing.B) {
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(b)
 	c := New(client)
 	for b.Loop() {
 		cacheKeyVersion(c, "key")
@@ -42,13 +39,13 @@ func BenchmarkCacheKeyVersion(b *testing.B) {
 }
 
 func BenchmarkGetOrLoad_CacheHit(b *testing.B) {
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
 	data := map[string]int{"x": 1}
 	bytes, _ := json.Marshal(data)
 	for range b.N {
-		mock.ExpectGet("key").SetVal(string(bytes))
+		expectFreshValue(mock, "key", string(bytes))
 	}
 	for b.Loop() {
 		_, _ = GetOrLoad(c, ctx, "key", time.Minute, func(context.Context) (map[string]int, error) {
@@ -58,13 +55,14 @@ func BenchmarkGetOrLoad_CacheHit(b *testing.B) {
 }
 
 func BenchmarkGetOrLoad_CacheMiss(b *testing.B) {
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
 	for i := range b.N {
 		key := fmt.Sprintf("key-%d", i)
-		mock.ExpectGet(key).SetErr(redis.Nil)
-		mock.ExpectSet(key, []byte(`{"x":1}`), time.Minute).SetVal("OK")
+		expectFreshValueMiss(mock, key)
+		expectMutationSnapshot(mock, key)
+		expectLoadedValueWrite(mock, key, []byte(`{"x":1}`)).SetVal(1)
 	}
 	b.ResetTimer()
 	for i := range b.N {
@@ -76,11 +74,11 @@ func BenchmarkGetOrLoad_CacheMiss(b *testing.B) {
 }
 
 func BenchmarkCacheSet(b *testing.B) {
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
 	for range b.N {
-		mock.ExpectSet("key", []byte(`42`), time.Minute).SetVal("OK")
+		expectSetValue(mock, "key", []byte(`42`), time.Minute).SetVal(1)
 	}
 	for b.Loop() {
 		_ = c.Set(ctx, "key", 42, time.Minute)
@@ -88,11 +86,11 @@ func BenchmarkCacheSet(b *testing.B) {
 }
 
 func BenchmarkCacheDel(b *testing.B) {
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
 	for range b.N {
-		mock.ExpectDel("key").SetVal(1)
+		expectDelKeys(mock, "key").SetVal(2)
 	}
 	for b.Loop() {
 		_ = c.Del(ctx, "key")
@@ -100,8 +98,7 @@ func BenchmarkCacheDel(b *testing.B) {
 }
 
 func BenchmarkCachedValue_Get_Hit(b *testing.B) {
-	v := NewCachedValue[int](context.Background(), "k", time.Minute)
-	defer v.Stop()
+	v := MustNewCachedValue[int]("k", time.Minute)
 	ctx := context.Background()
 	_, _ = v.Get(ctx, func(context.Context) (int, error) { return 42, nil })
 	for b.Loop() {
@@ -110,8 +107,7 @@ func BenchmarkCachedValue_Get_Hit(b *testing.B) {
 }
 
 func BenchmarkCachedValue_Get_Miss(b *testing.B) {
-	v := NewCachedValue[int](context.Background(), "k", time.Nanosecond)
-	defer v.Stop()
+	v := MustNewCachedValue[int]("k", time.Nanosecond)
 	ctx := context.Background()
 	time.Sleep(5 * time.Millisecond)
 	b.ResetTimer()
@@ -122,8 +118,7 @@ func BenchmarkCachedValue_Get_Miss(b *testing.B) {
 }
 
 func BenchmarkCachedValue_Get_Parallel(b *testing.B) {
-	v := NewCachedValue[int](context.Background(), "k", time.Minute)
-	defer v.Stop()
+	v := MustNewCachedValue[int]("k", time.Minute)
 	ctx := context.Background()
 	_, _ = v.Get(ctx, func(context.Context) (int, error) { return 42, nil })
 	b.ResetTimer()
@@ -135,8 +130,7 @@ func BenchmarkCachedValue_Get_Parallel(b *testing.B) {
 }
 
 func BenchmarkCachedValue_Invalidate(b *testing.B) {
-	v := NewCachedValue[int](context.Background(), "k", time.Minute)
-	defer v.Stop()
+	v := MustNewCachedValue[int]("k", time.Minute)
 	ctx := context.Background()
 	_, _ = v.Get(ctx, func(context.Context) (int, error) { return 42, nil })
 	for b.Loop() {
@@ -145,7 +139,7 @@ func BenchmarkCachedValue_Invalidate(b *testing.B) {
 }
 
 func BenchmarkEvictVersionMapExcess(b *testing.B) {
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(b)
 	c := New(client, WithMaxVersionMapEntries(100))
 	for i := range 200 {
 		cacheKeyVersion(c, fmt.Sprintf("key-%d", i))

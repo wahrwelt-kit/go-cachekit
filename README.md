@@ -21,10 +21,10 @@ import "github.com/wahrwelt-kit/go-cachekit"
 ### Cache (Redis JSON + singleflight)
 
 - **New(client)** - build Cache from go-redis Client
-- **GetOrLoad[T]** - get from Redis or call loadFn, store with ttl, return; singleflight per key
-- **Del** - delete keys and forget singleflight
+- **GetOrLoad[T]** - get from Redis or call loadFn, store with ttl through a Lua exact/prefix mutation-fence check, return; singleflight per key and mutation generation; optional `WithBypassOnCacheError(true)` for cache-aside degradation
+- **Del** - delete keys and advance each key fence
 - **Set** - marshal value as JSON, set with ttl
-- **DeleteByPrefix** - scan prefix\*, unlink keys, forget singleflight
+- **DeleteByPrefix** - advance the prefix fence, scan prefix\*, unlink stale keys and cache tokens without deleting fresh post-fence writes
 
 ### SieveCache (in-memory SIEVE-style eviction)
 
@@ -39,26 +39,35 @@ SieveCache is intentionally the only in-memory eviction policy in this package. 
 
 ### CachedValue (single key, TTL, singleflight)
 
-- **NewCachedValue[T](key, ttl)** - one key, ttlcache + singleflight
+- **NewCachedValue[T](key, ttl)** - one key, TTL + singleflight, returns error on invalid input
+- **MustNewCachedValue[T](key, ttl)** - panic-on-error variant for static configuration
 - **Get(ctx, load)** - cached or load(ctx), then cache
 - **GetStale** - return in-TTL value or the last successfully loaded stale entry without loading
 - **Invalidate** - delete, forget singleflight, and clear the stale entry
+- **WithRespectCallerCancel(true)** - make load observe caller cancellation; default lets load finish and refresh the cache
 
 ### Redis client
 
-- **RedisConfig** - Host, Port, Password, PoolSize, MinIdleConns
-- **NewRedisClient(ctx, cfg)** - NewClient + Ping; error if unreachable
+- **RedisConfig** - Host, Port, Username, Password, PoolSize, MinIdleConns
+- **RedisConfigFromURL(rawURL)** - parse `redis://` / `rediss://` into RedisConfig, including ACL username and `pool_size` / `min_idle_conns` query options
+- **NewRedisClient(ctx, cfg)** - NewClient + Ping; fail-fast on invalid config or unreachable Redis
 
 ### Stores
 
 - **KeyValueStore** - Get, Set, Del
 - **RedisKeyValueStore** - implements KeyValueStore
-- **PubSubStore** - Publish, Subscribe
+- **PubSubStore** - Publish, Subscribe; channel names must be non-empty
+- **RedisPubSubStore.OnDrop / OnError** - callbacks for dropped messages and unexpected subscription closure
 
 ## Example
 
 ```go
-rdb, err := cachekit.NewRedisClient(ctx, &cachekit.RedisConfig{Host: "localhost", Port: 6379})
+cfg, err := cachekit.RedisConfigFromURL("redis://cache-user:secret@localhost:6379/0?pool_size=32&min_idle_conns=8")
+if err != nil {
+    log.Fatal(err)
+}
+
+rdb, err := cachekit.NewRedisClient(ctx, cfg)
 if err != nil {
     log.Fatal(err)
 }
@@ -67,7 +76,12 @@ defer rdb.Close()
 c := cachekit.New(rdb)
 val, err := cachekit.GetOrLoad(c, ctx, "user:1", 5*time.Minute, func(ctx context.Context) (User, error) {
     return db.GetUser(ctx, 1)
-})
+}, cachekit.WithBypassOnCacheError(true))
+
+single, err := cachekit.NewCachedValue[User]("user:1:cached", time.Minute)
+if err != nil {
+    log.Fatal(err)
+}
 
 // SIEVE-style cache - lazy promotion and quick demotion for skewed workloads
 sieve := cachekit.NewSieveCache[string, string](1000)

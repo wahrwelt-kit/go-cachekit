@@ -7,3 +7,10 @@ updates:
     labels:
       - "dependencies"
       - "go"
+  - package-ecosystem: "gomod"
+    directory: "/integration"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "go"

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redismock/v9"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +40,7 @@ func TestRedisKeyValueStore_NilReceiver(t *testing.T) {
 
 func TestRedisKeyValueStore_Get_NotFound_ReturnsErrNotFound(t *testing.T) {
 	t.Parallel()
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(t)
 	mock.ExpectGet("missing").SetErr(redis.Nil)
 	store := &RedisKeyValueStore{Client: client}
 	val, err := store.Get(context.Background(), "missing")
@@ -53,7 +52,7 @@ func TestRedisKeyValueStore_Get_NotFound_ReturnsErrNotFound(t *testing.T) {
 
 func TestRedisKeyValueStore_SetGet_RoundTrip(t *testing.T) {
 	t.Parallel()
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(t)
 	payload := []byte(`{"x":1}`)
 	mock.ExpectSet("k", payload, time.Minute).SetVal("OK")
 	mock.ExpectGet("k").SetVal(string(payload))
@@ -69,15 +68,27 @@ func TestRedisKeyValueStore_SetGet_RoundTrip(t *testing.T) {
 
 func TestRedisKeyValueStore_Get_EmptyKey(t *testing.T) {
 	t.Parallel()
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(t)
 	store := &RedisKeyValueStore{Client: client}
 	_, err := store.Get(context.Background(), "")
 	require.ErrorIs(t, err, ErrEmptyKey)
 }
 
+func TestRedisKeyValueStore_NilContext(t *testing.T) {
+	t.Parallel()
+	client, _ := newRedisClientMock(t)
+	store := &RedisKeyValueStore{Client: client}
+	_, err := store.Get(nilContext(), "k")
+	require.ErrorIs(t, err, ErrNilContext)
+	err = store.Set(nilContext(), "k", []byte("v"), time.Minute)
+	require.ErrorIs(t, err, ErrNilContext)
+	err = store.Del(nilContext(), "k")
+	require.ErrorIs(t, err, ErrNilContext)
+}
+
 func TestRedisKeyValueStore_Set_EmptyKey(t *testing.T) {
 	t.Parallel()
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(t)
 	store := &RedisKeyValueStore{Client: client}
 	err := store.Set(context.Background(), "", []byte("v"), time.Minute)
 	require.ErrorIs(t, err, ErrEmptyKey)
@@ -85,7 +96,7 @@ func TestRedisKeyValueStore_Set_EmptyKey(t *testing.T) {
 
 func TestRedisKeyValueStore_Set_InvalidTTL(t *testing.T) {
 	t.Parallel()
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(t)
 	store := &RedisKeyValueStore{Client: client}
 	err := store.Set(context.Background(), "k", []byte("v"), 0)
 	require.Error(t, err)
@@ -94,21 +105,21 @@ func TestRedisKeyValueStore_Set_InvalidTTL(t *testing.T) {
 
 func TestRedisKeyValueStore_Del_NoKeys(t *testing.T) {
 	t.Parallel()
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(t)
 	store := &RedisKeyValueStore{Client: client}
 	require.NoError(t, store.Del(context.Background()))
 }
 
 func TestRedisKeyValueStore_Del_EmptyKeyString(t *testing.T) {
 	t.Parallel()
-	client, _ := redismock.NewClientMock()
+	client, _ := newRedisClientMock(t)
 	store := &RedisKeyValueStore{Client: client}
 	require.ErrorIs(t, store.Del(context.Background(), ""), ErrEmptyKey)
 }
 
 func TestRedisKeyValueStore_Get_RedisError(t *testing.T) {
 	t.Parallel()
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(t)
 	mock.ExpectGet("k").SetErr(errors.New("redis down"))
 	store := &RedisKeyValueStore{Client: client}
 	_, err := store.Get(context.Background(), "k")
@@ -118,7 +129,7 @@ func TestRedisKeyValueStore_Get_RedisError(t *testing.T) {
 
 func TestRedisKeyValueStore_Set_RedisError(t *testing.T) {
 	t.Parallel()
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(t)
 	mock.ExpectSet("k", []byte("v"), time.Minute).SetErr(errors.New("redis down"))
 	store := &RedisKeyValueStore{Client: client}
 	err := store.Set(context.Background(), "k", []byte("v"), time.Minute)
@@ -128,7 +139,7 @@ func TestRedisKeyValueStore_Set_RedisError(t *testing.T) {
 
 func TestRedisKeyValueStore_Del_RedisError(t *testing.T) {
 	t.Parallel()
-	client, mock := redismock.NewClientMock()
+	client, mock := newRedisClientMock(t)
 	mock.ExpectDel("k").SetErr(errors.New("redis down"))
 	store := &RedisKeyValueStore{Client: client}
 	err := store.Del(context.Background(), "k")

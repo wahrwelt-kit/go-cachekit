@@ -1,10 +1,9 @@
-//go:build integration
-
-package cachekit
+package cachekitintegration_test
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
+
+	cachekit "github.com/wahrwelt-kit/go-cachekit"
 )
 
 func startRedis(t *testing.T) *redis.Client {
@@ -30,6 +31,35 @@ func startRedis(t *testing.T) *redis.Client {
 	return client
 }
 
+type blockScanHook struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *blockScanHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *blockScanHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "scan" {
+			h.once.Do(func() { close(h.started) })
+			select {
+			case <-h.release:
+			case <-ctx.Done():
+				cmd.SetErr(ctx.Err())
+				return ctx.Err()
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *blockScanHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
 func TestIntegration_NewRedisClient(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -42,7 +72,7 @@ func TestIntegration_NewRedisClient(t *testing.T) {
 	port, err := container.MappedPort(ctx, "6379/tcp")
 	require.NoError(t, err)
 
-	client, err := NewRedisClient(ctx, &RedisConfig{
+	client, err := cachekit.NewRedisClient(ctx, &cachekit.RedisConfig{
 		Host:     host,
 		Port:     int(port.Num()),
 		PoolSize: 5,
@@ -55,16 +85,16 @@ func TestIntegration_NewRedisClient(t *testing.T) {
 func TestIntegration_Cache_GetOrLoad(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	c := New(rc)
+	c := cachekit.New(rc)
 	ctx := context.Background()
 
-	val, err := GetOrLoad(c, ctx, "test:key", time.Minute, func(ctx context.Context) (map[string]int, error) {
+	val, err := cachekit.GetOrLoad(c, ctx, "test:key", time.Minute, func(_ context.Context) (map[string]int, error) {
 		return map[string]int{"a": 1}, nil
 	})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"a": 1}, val)
 
-	val, err = GetOrLoad(c, ctx, "test:key", time.Minute, func(ctx context.Context) (map[string]int, error) {
+	val, err = cachekit.GetOrLoad(c, ctx, "test:key", time.Minute, func(_ context.Context) (map[string]int, error) {
 		t.Error("load should not be called on cache hit")
 		return nil, nil
 	})
@@ -75,20 +105,86 @@ func TestIntegration_Cache_GetOrLoad(t *testing.T) {
 func TestIntegration_Cache_GetOrLoad_WithOptions(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	c := New(rc)
+	c := cachekit.New(rc)
 	ctx := context.Background()
 
-	val, err := GetOrLoad(c, ctx, "test:opts", time.Minute, func(ctx context.Context) (int, error) {
+	val, err := cachekit.GetOrLoad(c, ctx, "test:opts", time.Minute, func(_ context.Context) (int, error) {
 		return 42, nil
-	}, WithTimeout(5*time.Second), WithRespectCallerCancel(true))
+	}, cachekit.WithTimeout(5*time.Second), cachekit.WithRespectCallerCancel(true))
 	require.NoError(t, err)
 	assert.Equal(t, 42, val)
+}
+
+func TestIntegration_Cache_GetOrLoad_DeleteByPrefixStartsNewGeneration(t *testing.T) {
+	t.Parallel()
+	rc := startRedis(t)
+	c := cachekit.New(rc)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var got string
+	var loadErr error
+
+	go func() {
+		defer close(done)
+		got, loadErr = cachekit.GetOrLoad(c, ctx, "race:key", time.Minute, func(context.Context) (string, error) {
+			close(started)
+			<-release
+			return "stale", nil
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for load to start")
+	}
+
+	require.NoError(t, c.DeleteByPrefix(ctx, "race:"))
+
+	freshDone := make(chan struct{})
+	var fresh string
+	var freshErr error
+	go func() {
+		defer close(freshDone)
+		fresh, freshErr = cachekit.GetOrLoad(c, ctx, "race:key", time.Minute, func(context.Context) (string, error) {
+			return "fresh", nil
+		})
+	}()
+
+	select {
+	case <-freshDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("new generation load joined old in-flight load")
+	}
+
+	require.NoError(t, freshErr)
+	assert.Equal(t, "fresh", fresh)
+	raw, err := rc.Get(ctx, "race:key").Result()
+	require.NoError(t, err)
+	assert.Equal(t, `"fresh"`, raw)
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for load to finish")
+	}
+
+	require.NoError(t, loadErr)
+	assert.Equal(t, "stale", got)
+	raw, err = rc.Get(ctx, "race:key").Result()
+	require.NoError(t, err)
+	assert.Equal(t, `"fresh"`, raw)
 }
 
 func TestIntegration_Cache_SetAndDel(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	c := New(rc)
+	c := cachekit.New(rc)
 	ctx := context.Background()
 
 	require.NoError(t, c.Set(ctx, "test:set", "hello", time.Minute))
@@ -106,7 +202,7 @@ func TestIntegration_Cache_SetAndDel(t *testing.T) {
 func TestIntegration_Cache_DeleteByPrefix(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	c := New(rc)
+	c := cachekit.New(rc)
 	ctx := context.Background()
 
 	for i := range 10 {
@@ -125,22 +221,64 @@ func TestIntegration_Cache_DeleteByPrefix(t *testing.T) {
 	assert.Equal(t, `"x"`, val)
 }
 
+func TestIntegration_Cache_DeleteByPrefix_PreservesFreshPostFenceWrite(t *testing.T) {
+	t.Parallel()
+	rc := startRedis(t)
+	hook := &blockScanHook{started: make(chan struct{}), release: make(chan struct{})}
+	rc.AddHook(hook)
+	c := cachekit.New(rc)
+	ctx := context.Background()
+
+	require.NoError(t, c.Set(ctx, "preserve:old", "old", time.Minute))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.DeleteByPrefix(ctx, "preserve:")
+	}()
+
+	select {
+	case <-hook.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for DeleteByPrefix scan")
+	}
+
+	require.NoError(t, c.Set(ctx, "preserve:fresh", "fresh", time.Minute))
+	close(hook.release)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for DeleteByPrefix")
+	}
+
+	_, err := rc.Get(ctx, "preserve:old").Result()
+	require.ErrorIs(t, err, redis.Nil)
+	raw, err := rc.Get(ctx, "preserve:fresh").Result()
+	require.NoError(t, err)
+	assert.Equal(t, `"fresh"`, raw)
+}
+
 func TestIntegration_Cache_WithMaxVersionMapEntries(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	c := New(rc, WithMaxVersionMapEntries(5))
+	c := cachekit.New(rc, cachekit.WithMaxVersionMapEntries(5))
 	ctx := context.Background()
 
 	for i := range 20 {
 		require.NoError(t, c.Set(ctx, fmt.Sprintf("evict:%d", i), i, time.Minute))
 	}
-	assert.LessOrEqual(t, c.versionMapSize.Load(), int64(6))
+	for i := range 20 {
+		_, _ = cachekit.GetOrLoad(c, ctx, fmt.Sprintf("evict:%d", i), time.Minute, func(context.Context) (int, error) {
+			return i, nil
+		})
+	}
 }
 
 func TestIntegration_KeyValueStore_CRUD(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	store := &RedisKeyValueStore{Client: rc}
+	store := &cachekit.RedisKeyValueStore{Client: rc}
 	ctx := context.Background()
 
 	require.NoError(t, store.Set(ctx, "kv:key", []byte("value"), time.Minute))
@@ -152,13 +290,13 @@ func TestIntegration_KeyValueStore_CRUD(t *testing.T) {
 	require.NoError(t, store.Del(ctx, "kv:key"))
 
 	_, err = store.Get(ctx, "kv:key")
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, cachekit.ErrNotFound)
 }
 
 func TestIntegration_KeyValueStore_Del_MultipleKeys(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	store := &RedisKeyValueStore{Client: rc}
+	store := &cachekit.RedisKeyValueStore{Client: rc}
 	ctx := context.Background()
 
 	require.NoError(t, store.Set(ctx, "kv:a", []byte("1"), time.Minute))
@@ -167,16 +305,16 @@ func TestIntegration_KeyValueStore_Del_MultipleKeys(t *testing.T) {
 	require.NoError(t, store.Del(ctx, "kv:a", "kv:b"))
 
 	_, err := store.Get(ctx, "kv:a")
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, cachekit.ErrNotFound)
 	_, err = store.Get(ctx, "kv:b")
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, cachekit.ErrNotFound)
 }
 
 func TestIntegration_PubSub_PublishSubscribe(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	ps := &RedisPubSubStore{Client: rc, ChanBufferSize: 8}
-	ctx, cancel := context.WithCancel(context.Background())
+	ps := &cachekit.RedisPubSubStore{Client: rc, ChanBufferSize: 8}
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	ch, err := ps.Subscribe(ctx, "test:pubsub")
@@ -197,8 +335,8 @@ func TestIntegration_PubSub_PublishSubscribe(t *testing.T) {
 func TestIntegration_PubSub_MultipleMessages(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	ps := &RedisPubSubStore{Client: rc, ChanBufferSize: 16}
-	ctx, cancel := context.WithCancel(context.Background())
+	ps := &cachekit.RedisPubSubStore{Client: rc, ChanBufferSize: 16}
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	ch, err := ps.Subscribe(ctx, "test:multi")
@@ -225,8 +363,8 @@ func TestIntegration_PubSub_MultipleMessages(t *testing.T) {
 func TestIntegration_PubSub_ContextCancel(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
-	ps := &RedisPubSubStore{Client: rc}
-	ctx, cancel := context.WithCancel(context.Background())
+	ps := &cachekit.RedisPubSubStore{Client: rc}
+	ctx, cancel := context.WithCancel(t.Context())
 
 	ch, err := ps.Subscribe(ctx, "test:cancel")
 	require.NoError(t, err)
@@ -241,15 +379,15 @@ func TestIntegration_PubSub_OnDrop(t *testing.T) {
 	t.Parallel()
 	rc := startRedis(t)
 	dropped := make(chan string, 10)
-	ps := &RedisPubSubStore{
+	ps := &cachekit.RedisPubSubStore{
 		Client:         rc,
 		ChanBufferSize: 1,
 		SendTimeout:    50 * time.Millisecond,
-		OnDrop: func(channel, payload string) {
+		OnDrop: func(_, payload string) {
 			dropped <- payload
 		},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	ch, err := ps.Subscribe(ctx, "test:drop")

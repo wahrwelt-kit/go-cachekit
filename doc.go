@@ -2,8 +2,8 @@
 //
 // # Redis connection
 //
-// NewRedisClient builds a redis-go client from RedisConfig and verifies connectivity with Ping
-// Host and Port are required; PoolSize and MinIdleConns default to 50 and 10 when zero
+// RedisConfigFromURL parses redis:// and rediss:// URLs into RedisConfig. NewRedisClient builds a redis-go client from RedisConfig and verifies connectivity with Ping
+// Host and Port are required; Username is supported for Redis ACL auth; DB must be non-negative; PoolSize defaults to 50 and MinIdleConns defaults to 10 capped by PoolSize when zero
 // Do not log RedisConfig as-is; use String() or GoString() for safe output (password is redacted)
 //
 // # Redis JSON cache (Cache)
@@ -14,17 +14,18 @@
 //     loadFn receives the request context and may respect context cancellation. Uses singleflight so concurrent
 //     requests for the same key run loadFn once. Use each key with exactly one type T; using the same key with
 //     different T causes a type error. ttl must be positive
-//   - Set: writes value as JSON with the given ttl (must be positive). Also forgets the key in singleflight and increments the per-key version so concurrent GetOrLoad does not use a stale singleflight result
-//   - Del: deletes keys and forgets them in singleflight
-//   - DeleteByPrefix: scans keys matching prefix*, Unlinks them, and forgets them in singleflight. prefix must be non-empty
+//   - Set: writes value as JSON with the given ttl (must be positive). Also advances the key mutation fence so older in-flight GetOrLoad calls cannot overwrite it
+//   - Del: deletes keys and advances each key mutation fence
+//   - DeleteByPrefix: advances the prefix mutation fence, scans keys matching prefix*, and Unlinks them with their cache token keys. prefix must be non-empty. Pass WithDeleteByPrefixLimit(n) to cap SCAN iterations
 //     Redis glob characters (\, *, ?, [, ]) in prefix are escaped
 //
-// GetOrLoad options: pass WithTimeout(d) and/or WithRespectCallerCancel(true) as variadic opts (type GetOrLoadOption). Resolved options are in GetOrLoadOpts
+// GetOrLoad options: pass WithTimeout(d), WithRespectCallerCancel(true), and/or WithBypassOnCacheError(true) as variadic opts (type GetOrLoadOption). Resolved options are in GetOrLoadOpts
 // Optional WithMaxVersionMapEntries(n) limits in-memory version map size; when exceeded, excess entries are evicted (no ordering guarantee)
-// GetOrLoad caveats: Del and DeleteByPrefix increment a per-key version; a load that completes after the key was
-// deleted will not write back to Redis. If loadFn succeeds but Redis Set fails, GetOrLoad returns (data, setErr)-caller
-// gets both the data and the set error. Consistency is best-effort: there is a small race window
-// between the in-memory version check and Redis Set; if Del runs in that window, a stale value may be written back
+// GetOrLoad stores a cache-entry token beside every JSON value and writes loaded values through a Redis Lua compare-and-set
+// against exact-key and matching-prefix mutation fences. If Del, Set, or DeleteByPrefix runs while a load is in flight,
+// that older load returns its data to the caller but does not write back to Redis. Calls that start after the mutation
+// use a new singleflight generation. Prefix invalidation is logical immediately; physical deletion uses SCAN plus a Lua stale-token check so fresh post-invalidation values are not removed.
+// If loadFn succeeds but Redis write-back fails, GetOrLoad returns (data, setErr) so the caller receives both the value and the cache write error. WithBypassOnCacheError(true) returns loaded data without surfacing Redis cache errors
 // Values have TTL and will expire
 //
 // # In-memory SIEVE-style cache (SieveCache)
@@ -44,8 +45,8 @@
 //
 // # Single-value TTL cache (CachedValue)
 //
-// CachedValue caches one value by key with TTL and singleflight. Prefer NewCachedValueE (returns error) over NewCachedValue (panics if ttl <= 0 or key is empty) for config-driven or dynamic ttl. When ctx is cancelled the internal goroutine stops. If ctx is context.Background(), the goroutine never exits until Stop is called-call Stop when the value is no longer needed to avoid goroutine leaks
-// Get calls load with a configurable timeout (default 30s); use WithLoadTimeout(d) (CachedValueOption) when constructing to override. GetStale returns the in-TTL value or the last successfully loaded stale entry without calling load. Invalidate clears the value, stale entry, and singleflight; an in-flight Get that finishes after Invalidate will not write back
+// CachedValue caches one value by key with TTL and singleflight. NewCachedValue returns an error if ttl <= 0 or key is empty. MustNewCachedValue panics on invalid input and is intended only for static configuration. It does not start background goroutines
+// Get calls load with a configurable timeout (default 30s); use WithLoadTimeout(d) (CachedValueOption) when constructing to override. By default load ignores caller cancellation through context.WithoutCancel; pass WithRespectCallerCancel(true) to NewCachedValue when caller cancellation should abort the load. GetStale returns the in-TTL value or the last successfully loaded stale entry without calling load. Invalidate clears the value, stale entry, and singleflight; an in-flight Get that finishes after Invalidate will not write back
 //
 // # Key-value store
 //
@@ -54,7 +55,7 @@
 //
 // # Pub/Sub
 //
-// PubSubStore provides Publish and Subscribe. RedisPubSubStore implements it; ChanBufferSize is the subscribe channel buffer (default 64). SendTimeout (default 30s) limits how long the subscribe goroutine waits to send a message to the returned channel; when exceeded the message is dropped and OnDrop is invoked synchronously-keep OnDrop fast to avoid blocking the subscribe loop
+// PubSubStore provides Publish and Subscribe. RedisPubSubStore implements it; channel names must be non-empty. ChanBufferSize is the subscribe channel buffer (default 64). SendTimeout (default 30s) limits how long the subscribe goroutine waits to send a message to the returned channel; when exceeded the message is dropped and OnDrop is invoked synchronously-keep OnDrop fast to avoid blocking the subscribe loop. OnError reports unexpected Redis-side subscription closure
 // Subscribe's goroutine exits when ctx is cancelled. The caller must cancel ctx when done to avoid goroutine leaks. Correct usage
 //
 //	ctx, cancel := context.WithCancel(parent)
@@ -72,7 +73,12 @@
 // ErrEmptyKey when key or keys are empty where non-empty is required
 // ErrInvalidTTL when ttl is zero or negative
 // ErrEmptyPrefix when prefix is empty for DeleteByPrefix
+// ErrEmptyChannel when channel is empty for PubSubStore
+// ErrNilContext when a required context is nil
+// ErrNilLoadFunc when a required load function is nil
 // ErrNilCachedValue when CachedValue.Get is called on nil receiver
 // ErrUnexpectedType when cached value type does not match expected
-// ErrRedisConfigNil, ErrRedisHostRequired, ErrRedisInvalidPort by NewRedisClient on invalid config
+// ErrRedisConfigNil, ErrRedisHostRequired, ErrRedisInvalidPort, ErrRedisInvalidDB, ErrRedisInvalidPoolSize, ErrRedisInvalidMinIdleConns by NewRedisClient on invalid config
+// ErrRedisURLRequired and ErrRedisInvalidURL by RedisConfigFromURL
+// ErrPubSubClosed may be reported through RedisPubSubStore.OnError
 package cachekit

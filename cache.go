@@ -19,6 +19,100 @@ const (
 	defaultGetOrLoadTimeout     = 30 * time.Second
 	defaultMaxVersionMapEntries = 65536
 	evictCollectCap             = 4096
+	redisKeyFencePrefix         = "\x00cachekit:mutation:key:"
+	redisPrefixFencePrefix      = "\x00cachekit:mutation:prefix:"
+	//nolint:gosec // Internal Redis cache metadata key prefix, not a credential.
+	redisEntryTokenPrefix = "\x00cachekit:entry_token:"
+	//nolint:dupword // Lua function contains repeated "end" tokens.
+	luaMutationSnapshotFunction = `
+local function snapshot(data_key, exact_key, prefix_fence_prefix)
+	local exact = redis.call("GET", exact_key)
+	if exact == false then
+		exact = "0"
+	end
+
+	local parts = {"k", exact}
+	local key_len = string.len(data_key)
+	for i = 1, key_len do
+		local prefix = string.sub(data_key, 1, i)
+		local prefix_version = redis.call("GET", prefix_fence_prefix .. prefix)
+		if prefix_version ~= false then
+			table.insert(parts, "p")
+			table.insert(parts, tostring(i))
+			table.insert(parts, prefix)
+			table.insert(parts, prefix_version)
+		end
+	end
+	return table.concat(parts, "\31")
+end
+`
+	mutationSnapshotScript = luaMutationSnapshotFunction + `
+return snapshot(ARGV[1], KEYS[1], ARGV[2])
+`
+	getFreshValueScript = luaMutationSnapshotFunction + `
+local value = redis.call("GET", KEYS[1])
+if value == false then
+	return {0}
+end
+local current = snapshot(ARGV[1], KEYS[3], ARGV[2])
+local token = redis.call("GET", KEYS[2])
+if token == false or token ~= current then
+	return {0}
+end
+return {1, value}
+`
+	setLoadedValueScript = luaMutationSnapshotFunction + `
+local current = snapshot(ARGV[1], KEYS[3], ARGV[2])
+if current ~= ARGV[3] then
+	return 0
+end
+redis.call("SET", KEYS[1], ARGV[4], "PX", ARGV[5])
+redis.call("SET", KEYS[2], current, "PX", ARGV[5])
+return 1
+`
+	setValueScript = luaMutationSnapshotFunction + `
+redis.call("INCR", KEYS[3])
+local current = snapshot(ARGV[1], KEYS[3], ARGV[2])
+redis.call("SET", KEYS[1], ARGV[3], "PX", ARGV[4])
+redis.call("SET", KEYS[2], current, "PX", ARGV[4])
+return 1
+`
+	bumpPrefixFenceScript = `return redis.call("INCR", KEYS[1])`
+	delKeysScript         = `
+local n = tonumber(ARGV[1])
+local deleted = 0
+for i = 1, n do
+	redis.call("INCR", KEYS[(2 * n) + i])
+end
+for i = 1, n do
+	deleted = deleted + redis.call("DEL", KEYS[i], KEYS[n + i])
+end
+return deleted
+`
+	//nolint:dupword // Lua script contains repeated "end" tokens.
+	unlinkStaleValuesScript = luaMutationSnapshotFunction + `
+local n = tonumber(ARGV[1])
+local prefix_fence_prefix = ARGV[2]
+local deleted = 0
+for i = 1, n do
+	local current = snapshot(KEYS[i], KEYS[(2 * n) + i], prefix_fence_prefix)
+	local token = redis.call("GET", KEYS[n + i])
+	if token == false or token ~= current then
+		deleted = deleted + redis.call("UNLINK", KEYS[i], KEYS[n + i])
+	end
+end
+return deleted
+`
+)
+
+var (
+	mutationSnapshotRedisScript  = redis.NewScript(mutationSnapshotScript)
+	getFreshValueRedisScript     = redis.NewScript(getFreshValueScript)
+	setLoadedValueRedisScript    = redis.NewScript(setLoadedValueScript)
+	setValueRedisScript          = redis.NewScript(setValueScript)
+	bumpPrefixFenceRedisScript   = redis.NewScript(bumpPrefixFenceScript)
+	delKeysRedisScript           = redis.NewScript(delKeysScript)
+	unlinkStaleValuesRedisScript = redis.NewScript(unlinkStaleValuesScript)
 )
 
 type inFlightEntry struct {
@@ -27,7 +121,7 @@ type inFlightEntry struct {
 
 // Cache provides Redis-backed JSON get/set with singleflight for GetOrLoad
 // Use each key with a single type T; mixing types for the same key causes errors
-// Del and DeleteByPrefix increment a per-key version; an in-flight load that finishes after Del will not write back
+// Del, Set, and DeleteByPrefix increment Redis mutation fences; in-flight loads that started before a matching mutation do not write back, and later calls use a new singleflight generation
 // Key versions are stored in a sync.Map. When the map size exceeds max entries (default 65536), excess entries are evicted (no ordering guarantee). Keys currently in flight for GetOrLoad are never evicted. Set WithMaxVersionMapEntries(0) for no limit (not recommended for long-lived instances)
 type Cache struct {
 	redis                *redis.Client
@@ -39,6 +133,45 @@ type Cache struct {
 	evictMu              sync.Mutex
 }
 
+func keyFenceKey(key string) string {
+	return redisKeyFencePrefix + key
+}
+
+func prefixFenceKey(prefix string) string {
+	return redisPrefixFencePrefix + prefix
+}
+
+func entryTokenKey(key string) string {
+	return redisEntryTokenPrefix + key
+}
+
+func delScriptKeys(keys []string) []string {
+	all := make([]string, 0, len(keys)*3)
+	all = append(all, keys...)
+	for _, key := range keys {
+		all = append(all, entryTokenKey(key))
+	}
+	for _, key := range keys {
+		all = append(all, keyFenceKey(key))
+	}
+	return all
+}
+
+func snapshotKeys(key string) []string {
+	return []string{keyFenceKey(key)}
+}
+
+func valueScriptKeys(key string) []string {
+	return []string{key, entryTokenKey(key), keyFenceKey(key)}
+}
+
+func mutationScriptArgs(key string, extra ...any) []any {
+	args := make([]any, 0, 2+len(extra))
+	args = append(args, key, redisPrefixFencePrefix)
+	args = append(args, extra...)
+	return args
+}
+
 // CacheOption configures a Cache at construction (e.g. WithMaxVersionMapEntries). Nil options are ignored
 type CacheOption func(*Cache)
 
@@ -48,13 +181,14 @@ func escapeRedisGlob(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 4)
-	for _, r := range s {
-		switch r {
+	for i := range len(s) {
+		ch := s[i]
+		switch ch {
 		case '\\', '*', '?', '[', ']':
-			b.WriteRune('\\')
+			b.WriteByte('\\')
 		default:
 		}
-		b.WriteRune(r)
+		b.WriteByte(ch)
 	}
 	return b.String()
 }
@@ -177,114 +311,216 @@ func evictVersionMapExcess(c *Cache, protectedKey string) {
 
 // GetOrLoadOpts holds options for GetOrLoad. Use WithTimeout and WithRespectCallerCancel to configure
 type GetOrLoadOpts struct {
-	// Timeout is the context timeout for the load function and for Redis Set (default 30s). Must be positive
+	// Timeout is the context timeout for the load function and Redis write-back (default 30s). Must be positive
 	Timeout time.Duration
 	// RespectCallerCancel, when true, passes the caller's context to loadFn so cancellation aborts the load; when false, loadFn runs with context.WithoutCancel so it can finish and write back
 	RespectCallerCancel bool
+	// BypassOnCacheError, when true, treats Redis cache read/snapshot/write errors as cache misses and returns loaded data if loadFn succeeds
+	BypassOnCacheError bool
 }
 
 // GetOrLoadOption configures GetOrLoad (e.g. WithTimeout, WithRespectCallerCancel). Nil options are ignored
-type GetOrLoadOption func(*GetOrLoadOpts)
+type GetOrLoadOption interface {
+	applyGetOrLoad(*GetOrLoadOpts)
+}
 
-// WithTimeout sets the context timeout for the load function and for Redis Set in GetOrLoad. Default is 30s. Only positive values are applied
+type getOrLoadOptionFunc func(*GetOrLoadOpts)
+
+func (f getOrLoadOptionFunc) applyGetOrLoad(o *GetOrLoadOpts) {
+	f(o)
+}
+
+// WithTimeout sets the context timeout for the load function and Redis write-back in GetOrLoad. Default is 30s. Only positive values are applied
 func WithTimeout(d time.Duration) GetOrLoadOption {
-	return func(o *GetOrLoadOpts) {
+	return getOrLoadOptionFunc(func(o *GetOrLoadOpts) {
 		if d > 0 {
 			o.Timeout = d
 		}
-	}
+	})
 }
 
-// WithRespectCallerCancel controls whether loadFn in GetOrLoad receives the caller's context. When true, loadFn sees cancellation; when false (default), loadFn runs with context.WithoutCancel so it can finish and write the result to Redis even if the caller cancels
-func WithRespectCallerCancel(respect bool) GetOrLoadOption {
-	return func(o *GetOrLoadOpts) { o.RespectCallerCancel = respect }
+type respectCallerCancelOption bool
+
+// RespectCallerCancelOption is accepted by both GetOrLoad and CachedValue constructors.
+type RespectCallerCancelOption interface {
+	GetOrLoadOption
+	CachedValueOption
 }
 
-// GetOrLoad returns the cached value for key or calls loadFn, stores the result with ttl, and returns it
-// Key must be non-empty. Use the same key only with one type T; otherwise concurrent calls with different T may get a type error
-// Del and DeleteByPrefix increment the key version so an in-flight load that completes after delete will not overwrite
-// There is a small TOCTOU window between the version check and Redis Set-a concurrent Del in that window may be overwritten by a stale Set; consistency is best-effort and TTL limits staleness
-// loadFn receives the request context and may respect context cancellation
-// If loadFn succeeds but Redis Set fails, returns (loadedData, err): caller receives the data and the set error
-// Optional opts: WithTimeout, WithRespectCallerCancel
-func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) { //nolint:cyclop,revive // cache loading logic requires multiple branching paths
-	var result T
-	if c == nil || c.redis == nil {
-		return result, ErrRedisNotConfigured
-	}
-	if key == "" {
-		return result, ErrEmptyKey
-	}
-	if ttl <= 0 {
-		return result, fmt.Errorf("cache GetOrLoad: %w, got %v", ErrInvalidTTL, ttl)
-	}
-	o := &GetOrLoadOpts{Timeout: defaultGetOrLoadTimeout}
+// WithRespectCallerCancel controls whether load functions receive the caller's context. It can be passed to GetOrLoad and NewCachedValue. When true, loadFn sees cancellation; when false (default), loadFn runs with context.WithoutCancel so it can finish and write the result even if the caller cancels
+func WithRespectCallerCancel(respect bool) RespectCallerCancelOption {
+	return respectCallerCancelOption(respect)
+}
+
+func (o respectCallerCancelOption) applyGetOrLoad(cfg *GetOrLoadOpts) {
+	cfg.RespectCallerCancel = bool(o)
+}
+
+// WithBypassOnCacheError controls whether Redis cache errors are fatal. When true, GetOrLoad calls loadFn and returns loaded data if Redis read, mutation snapshot, or write-back fails
+func WithBypassOnCacheError(bypass bool) GetOrLoadOption {
+	return getOrLoadOptionFunc(func(o *GetOrLoadOpts) {
+		o.BypassOnCacheError = bypass
+	})
+}
+
+func resolveGetOrLoadOpts(opts ...GetOrLoadOption) GetOrLoadOpts {
+	cfg := GetOrLoadOpts{Timeout: defaultGetOrLoadTimeout}
 	for _, opt := range opts {
 		if opt != nil {
-			opt(o)
+			opt.applyGetOrLoad(&cfg)
 		}
 	}
-	timeout := o.Timeout
-	if timeout <= 0 {
-		timeout = defaultGetOrLoadTimeout
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultGetOrLoadTimeout
 	}
-	respectCallerCancel := o.RespectCallerCancel
-	val, err := c.redis.Get(ctx, key).Result()
-	if err == nil {
-		if unmarshalErr := json.Unmarshal([]byte(val), &result); unmarshalErr != nil {
-			c.sf.Forget(key)
-			cacheKeyVersion(c, key).Add(1)
-			delErr := c.redis.Del(ctx, key).Err()
-			var zero T
-			if delErr != nil {
-				return zero, fmt.Errorf("cache get unmarshal: %w (del failed: %w)", unmarshalErr, delErr)
-			}
-			return zero, fmt.Errorf("cache get unmarshal: %w", unmarshalErr)
-		}
-		return result, nil
+	return cfg
+}
+
+func ttlMilliseconds(ttl time.Duration) int64 {
+	ms := ttl.Milliseconds()
+	if ms <= 0 {
+		return 1
 	}
-	if !errors.Is(err, redis.Nil) {
+	return ms
+}
+
+func (c *Cache) mutationSnapshot(ctx context.Context, key string) (string, error) {
+	token, err := mutationSnapshotRedisScript.Run(ctx, c.redis, snapshotKeys(key), mutationScriptArgs(key)...).Text()
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (c *Cache) bumpPrefixMutationVersion(ctx context.Context, prefix string) error {
+	if err := bumpPrefixFenceRedisScript.Run(ctx, c.redis, []string{prefixFenceKey(prefix)}).Err(); err != nil {
+		return fmt.Errorf("cache prefix mutation version bump: %w", err)
+	}
+	return nil
+}
+
+func (c *Cache) setLoadedValueIfUnchanged(ctx context.Context, key string, value []byte, ttl time.Duration, expectedToken string) error {
+	args := mutationScriptArgs(key, expectedToken, value, ttlMilliseconds(ttl))
+	return setLoadedValueRedisScript.Run(ctx, c.redis, valueScriptKeys(key), args...).Err()
+}
+
+func singleflightKey(key, mutationToken string) string {
+	return key + "\x00mutation:" + mutationToken
+}
+
+func (c *Cache) deleteCorruptCacheEntry(ctx context.Context, key string, unmarshalErr error) error {
+	cacheKeyVersion(c, key).Add(1)
+	if delErr := c.deleteKeys(ctx, []string{key}); delErr != nil {
+		return fmt.Errorf("cache get unmarshal: %w (del failed: %w)", unmarshalErr, delErr)
+	}
+	return fmt.Errorf("cache get unmarshal: %w", unmarshalErr)
+}
+
+func readCachedJSON[T any](c *Cache, ctx context.Context, key string) (value T, hit bool, err error) {
+	result, err := getFreshValueRedisScript.Run(ctx, c.redis, valueScriptKeys(key), mutationScriptArgs(key)...).Slice()
+	if err != nil {
 		var zero T
-		return zero, fmt.Errorf("cache get: %w", err)
+		return zero, false, fmt.Errorf("cache get: %w", err)
 	}
-	addInFlight(c, key)
-	defer removeInFlight(c, key)
-	ver := cacheKeyVersion(c, key)
-	baseCtx := ctx
-	if !respectCallerCancel {
-		baseCtx = context.WithoutCancel(ctx)
+	if len(result) == 0 {
+		var zero T
+		return zero, false, errors.New("cache get: malformed script result")
 	}
-	v, err, _ := c.sf.Do(key, func() (any, error) {
-		verBefore := ver.Load()
-		loadCtx, cancel := context.WithTimeout(baseCtx, timeout)
-		data, err := loadFn(loadCtx)
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("cache load: %w", err)
+	fresh, ok := result[0].(int64)
+	if !ok {
+		var zero T
+		return zero, false, fmt.Errorf("cache get: unexpected freshness flag %T", result[0])
+	}
+	if fresh == 0 {
+		return value, false, nil
+	}
+	if len(result) != 2 {
+		var zero T
+		return zero, false, errors.New("cache get: malformed hit result")
+	}
+	val, ok := result[1].(string)
+	if !ok {
+		if raw, ok := result[1].([]byte); ok {
+			val = string(raw)
+		} else {
+			var zero T
+			return zero, false, fmt.Errorf("cache get: unexpected value type %T", result[1])
 		}
-		if ver.Load() != verBefore {
+	}
+	if unmarshalErr := json.Unmarshal([]byte(val), &value); unmarshalErr != nil {
+		var zero T
+		return zero, false, c.deleteCorruptCacheEntry(ctx, key, unmarshalErr)
+	}
+	return value, true, nil
+}
+
+func callLoadWithTimeout[T any](baseCtx context.Context, cfg GetOrLoadOpts, loadFn func(context.Context) (T, error)) (T, error) {
+	loadCtx, cancel := context.WithTimeout(baseCtx, cfg.Timeout)
+	data, err := loadFn(loadCtx)
+	cancel()
+	if err != nil {
+		var zero T
+		return zero, fmt.Errorf("cache load: %w", err)
+	}
+	return data, nil
+}
+
+func loadBypassingCache[T any](c *Cache, baseCtx context.Context, key string, cfg GetOrLoadOpts, loadFn func(context.Context) (T, error)) (T, error) {
+	var zero T
+	v, err, _ := c.sf.Do(key+"\x00cache-bypass", func() (any, error) {
+		return callLoadWithTimeout(baseCtx, cfg, loadFn)
+	})
+	if err != nil {
+		return zero, err
+	}
+	typed, ok := v.(T)
+	if !ok && v != nil {
+		return zero, ErrUnexpectedType
+	}
+	return typed, nil
+}
+
+func loadAndStoreIfFresh[T any](
+	c *Cache,
+	baseCtx context.Context,
+	key string,
+	ttl time.Duration,
+	cfg GetOrLoadOpts,
+	localVersion *atomic.Uint64,
+	redisTokenBefore string,
+	loadFn func(context.Context) (T, error),
+) (T, error) {
+	var zero T
+	sfKey := singleflightKey(key, redisTokenBefore)
+	v, err, _ := c.sf.Do(sfKey, func() (any, error) {
+		verBefore := localVersion.Load()
+		data, err := callLoadWithTimeout(baseCtx, cfg, loadFn)
+		if err != nil {
+			return nil, err
+		}
+		if localVersion.Load() != verBefore {
 			return data, nil
 		}
 		bytes, marshalErr := json.Marshal(data)
 		if marshalErr != nil {
 			return nil, fmt.Errorf("cache load marshal: %w", marshalErr)
 		}
-		setCtx, cancel := context.WithTimeout(baseCtx, timeout)
-		setErr := c.redis.Set(setCtx, key, bytes, ttl).Err()
+		setCtx, cancel := context.WithTimeout(baseCtx, cfg.Timeout)
+		setErr := c.setLoadedValueIfUnchanged(setCtx, key, bytes, ttl, redisTokenBefore)
 		cancel()
 		if setErr != nil {
-			return data, fmt.Errorf("cache set after load: %w", setErr) //nolint:nilnil // cache SET failed but data is valid; caller gets value with non-fatal error
+			if cfg.BypassOnCacheError {
+				return data, nil
+			}
+			return data, fmt.Errorf("cache set after load: %w", setErr) //nolint:nilnil // cache write-back failed but data is valid; caller gets value with non-fatal error
 		}
 		return data, nil
 	})
-
 	cached, ok := v.(T)
 	if !ok && v != nil {
-		var zero T
 		return zero, ErrUnexpectedType
 	}
 	if err != nil {
-		var zero T
 		if ok {
 			return cached, err
 		}
@@ -293,7 +529,77 @@ func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Durati
 	return cached, nil
 }
 
-// Del deletes the given keys from Redis and forgets them in singleflight so subsequent GetOrLoad will reload
+func (c *Cache) deleteKeys(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if err := delKeysRedisScript.Run(ctx, c.redis, delScriptKeys(keys), len(keys)).Err(); err != nil {
+		return fmt.Errorf("cache del: %w", err)
+	}
+	return nil
+}
+
+func (c *Cache) unlinkStaleValues(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if err := unlinkStaleValuesRedisScript.Run(ctx, c.redis, delScriptKeys(keys), len(keys), redisPrefixFencePrefix).Err(); err != nil {
+		return fmt.Errorf("cache delete by prefix unlink: %w", err)
+	}
+	return nil
+}
+
+// GetOrLoad returns the cached value for key or calls loadFn, stores the result with ttl, and returns it
+// Key must be non-empty. Use the same key only with one type T; otherwise concurrent calls with different T may get a type error
+// Del, Set, and DeleteByPrefix increment Redis mutation fences. A load that completes after a matching mutation will not write back, and calls started after the mutation do not join older in-flight loads
+// loadFn receives the request context and may respect context cancellation
+// If loadFn succeeds but Redis write-back fails, returns (loadedData, err): caller receives the data and the write-back error
+// Optional opts: WithTimeout, WithRespectCallerCancel, WithBypassOnCacheError
+func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) { //nolint:cyclop,revive // cache loading logic requires multiple branching paths
+	var result T
+	if c == nil || c.redis == nil {
+		return result, ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return result, ErrNilContext
+	}
+	if key == "" {
+		return result, ErrEmptyKey
+	}
+	if ttl <= 0 {
+		return result, fmt.Errorf("cache GetOrLoad: %w, got %v", ErrInvalidTTL, ttl)
+	}
+	if loadFn == nil {
+		return result, ErrNilLoadFunc
+	}
+	cfg := resolveGetOrLoadOpts(opts...)
+	baseCtx := ctx
+	if !cfg.RespectCallerCancel {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	if cached, ok, err := readCachedJSON[T](c, ctx, key); ok || err != nil {
+		if err != nil && cfg.BypassOnCacheError {
+			return loadBypassingCache(c, baseCtx, key, cfg, loadFn)
+		}
+		return cached, err
+	}
+	versionCtx, cancel := context.WithTimeout(baseCtx, cfg.Timeout)
+	redisTokenBefore, err := c.mutationSnapshot(versionCtx, key)
+	cancel()
+	if err != nil {
+		if cfg.BypassOnCacheError {
+			return loadBypassingCache(c, baseCtx, key, cfg, loadFn)
+		}
+		var zero T
+		return zero, fmt.Errorf("cache mutation version: %w", err)
+	}
+	addInFlight(c, key)
+	defer removeInFlight(c, key)
+	ver := cacheKeyVersion(c, key)
+	return loadAndStoreIfFresh(c, baseCtx, key, ttl, cfg, ver, redisTokenBefore, loadFn)
+}
+
+// Del deletes the given keys from Redis and advances each key fence so subsequent GetOrLoad calls reload
 // All keys must be non-empty. Returns ErrRedisNotConfigured if the cache has no Redis client, ErrEmptyKey if any key is empty
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if c == nil || c.redis == nil {
@@ -302,22 +608,27 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	if ctx == nil {
+		return ErrNilContext
+	}
 	if slices.Contains(keys, "") {
 		return ErrEmptyKey
 	}
 	for _, key := range keys {
-		c.sf.Forget(key)
 		cacheKeyVersion(c, key).Add(1)
 	}
-	return c.redis.Del(ctx, keys...).Err()
+	return c.deleteKeys(ctx, keys)
 }
 
 // Set marshals value as JSON and stores it in Redis with the given ttl
-// Key must be non-empty; ttl must be positive. Also forgets the key in singleflight and increments the per-key version
+// Key must be non-empty; ttl must be positive. Also advances the key fence so older in-flight GetOrLoad calls cannot overwrite it
 // Returns ErrRedisNotConfigured, ErrEmptyKey, or ErrInvalidTTL on invalid input; errors from Redis are wrapped
 func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duration) error {
 	if c == nil || c.redis == nil {
 		return ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return ErrNilContext
 	}
 	if key == "" {
 		return ErrEmptyKey
@@ -329,9 +640,9 @@ func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duratio
 	if err != nil {
 		return fmt.Errorf("cache set marshal: %w", err)
 	}
-	c.sf.Forget(key)
 	cacheKeyVersion(c, key).Add(1)
-	if err := c.redis.Set(ctx, key, bytes, ttl).Err(); err != nil {
+	args := mutationScriptArgs(key, bytes, ttlMilliseconds(ttl))
+	if err := setValueRedisScript.Run(ctx, c.redis, valueScriptKeys(key), args...).Err(); err != nil {
 		return fmt.Errorf("cache set: %w", err)
 	}
 	return nil
@@ -339,35 +650,63 @@ func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duratio
 
 const deleteByPrefixBatchSize = 500
 
-// DeleteByPrefix scans keys matching prefix* and Unlinks them in Redis, and forgets each key in singleflight
-// prefix must be non-empty; Redis glob characters in prefix are escaped. maxIterations is optional (variadic): pass one positive int to cap SCAN iterations and avoid blocking; 0 or omitted means no limit
+type deleteByPrefixOptions struct {
+	limit int
+}
+
+// DeleteByPrefixOption configures DeleteByPrefix. Nil options are ignored.
+type DeleteByPrefixOption interface {
+	applyDeleteByPrefix(*deleteByPrefixOptions)
+}
+
+type deleteByPrefixOptionFunc func(*deleteByPrefixOptions)
+
+func (f deleteByPrefixOptionFunc) applyDeleteByPrefix(o *deleteByPrefixOptions) {
+	f(o)
+}
+
+// WithDeleteByPrefixLimit caps SCAN iterations for DeleteByPrefix. Zero or negative means no limit.
+func WithDeleteByPrefixLimit(limit int) DeleteByPrefixOption {
+	return deleteByPrefixOptionFunc(func(o *deleteByPrefixOptions) {
+		if limit > 0 {
+			o.limit = limit
+		}
+	})
+}
+
+// DeleteByPrefix advances the prefix fence, scans keys matching prefix*, and Unlinks them with their cache token keys
+// prefix must be non-empty; Redis glob characters in prefix are escaped. Pass WithDeleteByPrefixLimit(n) to cap SCAN iterations and avoid blocking; omitted means no limit
 // Returns ErrRedisNotConfigured or ErrEmptyPrefix on invalid input; scan/unlink errors are wrapped
-func (c *Cache) DeleteByPrefix(ctx context.Context, prefix string, maxIterations ...int) error {
+func (c *Cache) DeleteByPrefix(ctx context.Context, prefix string, opts ...DeleteByPrefixOption) error {
 	if c == nil || c.redis == nil {
 		return ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return ErrNilContext
 	}
 	if prefix == "" {
 		return ErrEmptyPrefix
 	}
-	var limit int
-	if len(maxIterations) > 0 {
-		limit = maxIterations[0]
+	cfg := deleteByPrefixOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt.applyDeleteByPrefix(&cfg)
+		}
+	}
+	if err := c.bumpPrefixMutationVersion(ctx, prefix); err != nil {
+		return err
 	}
 	match := escapeRedisGlob(prefix) + "*"
 	var cursor uint64
 	iterations := 0
-	for limit == 0 || iterations < limit {
+	for cfg.limit == 0 || iterations < cfg.limit {
 		keys, nextCursor, err := c.redis.Scan(ctx, cursor, match, deleteByPrefixBatchSize).Result()
 		if err != nil {
 			return fmt.Errorf("cache delete by prefix scan: %w", err)
 		}
 		if len(keys) > 0 {
-			for _, key := range keys {
-				c.sf.Forget(key)
-				cacheKeyVersion(c, key).Add(1)
-			}
-			if err := c.redis.Unlink(ctx, keys...).Err(); err != nil {
-				return fmt.Errorf("cache delete by prefix unlink: %w", err)
+			if err := c.unlinkStaleValues(ctx, keys); err != nil {
+				return err
 			}
 		}
 		iterations++

@@ -12,6 +12,10 @@ import (
 // Return quickly to avoid blocking the subscribe loop. Optional; nil means no callback
 type OnDropFunc func(channel, payload string)
 
+// OnErrorFunc is called when the subscribe loop observes an unexpected Redis-side error.
+// It is not called for caller context cancellation. Return quickly to avoid blocking cleanup.
+type OnErrorFunc func(channel string, err error)
+
 // RedisPubSubStore implements PubSubStore using a Redis client. Client must be non-nil
 type RedisPubSubStore struct {
 	// Client is the Redis client used for Publish and Subscribe. Must not be nil
@@ -24,14 +28,34 @@ type RedisPubSubStore struct {
 	SendTimeout time.Duration
 	// OnDrop is called when a message is dropped due to SendTimeout; nil disables the callback
 	OnDrop OnDropFunc
+	// OnError is called when Redis closes the subscription channel unexpectedly; nil disables the callback
+	OnError OnErrorFunc
 }
 
 var _ PubSubStore = (*RedisPubSubStore)(nil)
+
+func stopTimerDrain(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
 
 // Publish sends message to the given channel. Returns ErrRedisNotConfigured if the receiver or Client is nil
 func (r *RedisPubSubStore) Publish(ctx context.Context, channel, message string) error {
 	if r == nil || r.Client == nil {
 		return ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if channel == "" {
+		return ErrEmptyChannel
 	}
 	return r.Client.Publish(ctx, channel, message).Err()
 }
@@ -45,6 +69,12 @@ func (r *RedisPubSubStore) Publish(ctx context.Context, channel, message string)
 func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-chan string, error) { //nolint:gocognit,revive,cyclop // complex subscription management with reconnection logic
 	if r == nil || r.Client == nil {
 		return nil, ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+	if channel == "" {
+		return nil, ErrEmptyChannel
 	}
 	pubsub := r.Client.Subscribe(ctx, channel)
 	if _, err := pubsub.Receive(ctx); err != nil {
@@ -61,34 +91,42 @@ func (r *RedisPubSubStore) Subscribe(ctx context.Context, channel string) (<-cha
 	}
 	out := make(chan string, buf)
 	onDrop := r.OnDrop
+	onError := r.OnError
+	reportError := func(err error) {
+		if onError != nil && err != nil && ctx.Err() == nil {
+			onError(channel, err)
+		}
+	}
 	go func() {
 		defer close(out)
-		defer func() { _ = pubsub.Close() }()
+		defer func() {
+			if err := pubsub.Close(); err != nil {
+				reportError(fmt.Errorf("pubsub close: %w", err))
+			}
+		}()
 		var timer *time.Timer
 		for {
 			select {
 			case <-ctx.Done():
-				if timer != nil {
-					timer.Stop()
-				}
+				stopTimerDrain(timer)
 				return
 			case msg, ok := <-pubsub.Channel():
 				if !ok {
-					if timer != nil {
-						timer.Stop()
-					}
+					stopTimerDrain(timer)
+					reportError(ErrPubSubClosed)
 					return
 				}
 				if timer == nil {
 					timer = time.NewTimer(sendTimeout)
 				} else {
+					stopTimerDrain(timer)
 					timer.Reset(sendTimeout)
 				}
 				select {
 				case out <- msg.Payload:
-					timer.Stop()
+					stopTimerDrain(timer)
 				case <-ctx.Done():
-					timer.Stop()
+					stopTimerDrain(timer)
 					return
 				case <-timer.C:
 					if onDrop != nil {

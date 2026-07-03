@@ -35,6 +35,9 @@ func (r *RedisKeyValueStore) Get(ctx context.Context, key string) ([]byte, error
 	if r == nil || r.Client == nil {
 		return nil, ErrRedisNotConfigured
 	}
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
 	if key == "" {
 		return nil, ErrEmptyKey
 	}
@@ -52,6 +55,9 @@ func (r *RedisKeyValueStore) Get(ctx context.Context, key string) ([]byte, error
 func (r *RedisKeyValueStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	if r == nil || r.Client == nil {
 		return ErrRedisNotConfigured
+	}
+	if ctx == nil {
+		return ErrNilContext
 	}
 	if key == "" {
 		return ErrEmptyKey
@@ -72,6 +78,9 @@ func (r *RedisKeyValueStore) Del(ctx context.Context, keys ...string) error {
 	}
 	if len(keys) == 0 {
 		return nil
+	}
+	if ctx == nil {
+		return ErrNilContext
 	}
 	if slices.Contains(keys, "") {
 		return ErrEmptyKey
