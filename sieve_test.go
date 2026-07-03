@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLRFUCache_GetSet(t *testing.T) {
+func TestSieveCache_GetSet(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](10)
+	c := NewSieveCache[string, int](10)
 	_, ok := c.Get("a")
 	assert.False(t, ok)
 	c.Set("a", 1)
@@ -24,9 +24,22 @@ func TestLRFUCache_GetSet(t *testing.T) {
 	assert.Equal(t, 2, c.Len())
 }
 
-func TestLRFUCache_Eviction_UnvisitedFirst(t *testing.T) {
+func TestSieveCache_VisitedEntrySurvivesNextEviction(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](2)
+	c.Set("a", 1)
+	c.Set("b", 2)
+	c.Get("a")
+	c.Set("c", 3)
+	v, ok := c.Get("a")
+	require.True(t, ok)
+	assert.Equal(t, 1, v)
+	assert.Equal(t, 2, c.Len())
+}
+
+func TestSieveCache_Eviction_UnvisitedFirst(t *testing.T) {
+	t.Parallel()
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -49,15 +62,15 @@ func TestLRFUCache_Eviction_UnvisitedFirst(t *testing.T) {
 	assert.Equal(t, 4, v)
 }
 
-func TestLRFUCache_VisitedSurvivesEviction(t *testing.T) {
+func TestSieveCache_VisitedSurvivesEviction(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](2)
+	c := NewSieveCache[string, int](2)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	// Visit both
 	c.Get("a")
 	c.Get("b")
-	// Insert c - all visited, LRFU clears bits and evicts one
+	// Insert c - all visited, SIEVE-style eviction clears bits and evicts one
 	c.Set("c", 3)
 	assert.Equal(t, 2, c.Len())
 	// c must be present
@@ -66,9 +79,9 @@ func TestLRFUCache_VisitedSurvivesEviction(t *testing.T) {
 	assert.Equal(t, 3, v)
 }
 
-func TestLRFUCache_AllVisited_EvictsAfterClearing(t *testing.T) {
+func TestSieveCache_AllVisited_EvictsAfterClearing(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -92,9 +105,9 @@ func TestLRFUCache_AllVisited_EvictsAfterClearing(t *testing.T) {
 	assert.Equal(t, 2, present, "exactly one of a/b/c should be evicted")
 }
 
-func TestLRFUCache_SetOverwrites(t *testing.T) {
+func TestSieveCache_SetOverwrites(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](5)
+	c := NewSieveCache[string, int](5)
 	c.Set("a", 1)
 	c.Set("a", 2)
 	assert.Equal(t, 1, c.Len())
@@ -102,9 +115,9 @@ func TestLRFUCache_SetOverwrites(t *testing.T) {
 	assert.Equal(t, 2, v)
 }
 
-func TestLRFUCache_SetIfAbsent_NoOverwrite(t *testing.T) {
+func TestSieveCache_SetIfAbsent_NoOverwrite(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](5)
+	c := NewSieveCache[string, int](5)
 	c.SetIfAbsent("a", 1)
 	c.SetIfAbsent("a", 2)
 	assert.Equal(t, 1, c.Len())
@@ -112,9 +125,9 @@ func TestLRFUCache_SetIfAbsent_NoOverwrite(t *testing.T) {
 	assert.Equal(t, 1, v)
 }
 
-func TestLRFUCache_Delete(t *testing.T) {
+func TestSieveCache_Delete(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](5)
+	c := NewSieveCache[string, int](5)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -130,9 +143,9 @@ func TestLRFUCache_Delete(t *testing.T) {
 	assert.Equal(t, 3, vc)
 }
 
-func TestLRFUCache_Delete_Head(t *testing.T) {
+func TestSieveCache_Delete_Head(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -146,9 +159,9 @@ func TestLRFUCache_Delete_Head(t *testing.T) {
 	assert.Equal(t, 4, vd)
 }
 
-func TestLRFUCache_Delete_Tail(t *testing.T) {
+func TestSieveCache_Delete_Tail(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1) // tail
 	c.Set("b", 2)
 	c.Set("c", 3) // head
@@ -158,9 +171,9 @@ func TestLRFUCache_Delete_Tail(t *testing.T) {
 	assert.Equal(t, 3, c.Len())
 }
 
-func TestLRFUCache_Delete_SingleElement(t *testing.T) {
+func TestSieveCache_Delete_SingleElement(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Delete("a")
 	assert.Equal(t, 0, c.Len())
@@ -170,9 +183,9 @@ func TestLRFUCache_Delete_SingleElement(t *testing.T) {
 	assert.Equal(t, 2, v)
 }
 
-func TestLRFUCache_Peek(t *testing.T) {
+func TestSieveCache_Peek(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -189,9 +202,9 @@ func TestLRFUCache_Peek(t *testing.T) {
 	assert.False(t, ok, "a should be evicted because Peek does not mark visited")
 }
 
-func TestLRFUCache_Flush(t *testing.T) {
+func TestSieveCache_Flush(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](10)
+	c := NewSieveCache[string, int](10)
 	for i := range 10 {
 		c.Set(fmt.Sprintf("k%d", i), i)
 	}
@@ -204,20 +217,20 @@ func TestLRFUCache_Flush(t *testing.T) {
 	assert.Equal(t, 42, v)
 }
 
-func TestLRFUCache_DefaultSize(t *testing.T) {
+func TestSieveCache_DefaultSize(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](0)
+	c := NewSieveCache[string, int](0)
 	require.NotNil(t, c)
-	assert.Equal(t, DefaultLRFUCacheSize, c.Cap())
-	for i := range DefaultLRFUCacheSize {
+	assert.Equal(t, DefaultSieveCacheSize, c.Cap())
+	for i := range DefaultSieveCacheSize {
 		c.Set(fmt.Sprintf("k%d", i), i)
 	}
-	assert.Equal(t, DefaultLRFUCacheSize, c.Len())
+	assert.Equal(t, DefaultSieveCacheSize, c.Len())
 }
 
-func TestLRFUCache_NilSafe(t *testing.T) {
+func TestSieveCache_NilSafe(t *testing.T) {
 	t.Parallel()
-	var c *LRFUCache[string, int]
+	var c *SieveCache[string, int]
 	_, ok := c.Get("a")
 	assert.False(t, ok)
 	_, ok = c.Peek("a")
@@ -230,9 +243,9 @@ func TestLRFUCache_NilSafe(t *testing.T) {
 	assert.Equal(t, 0, c.Cap())
 }
 
-func TestLRFUCache_Concurrent(t *testing.T) {
+func TestSieveCache_Concurrent(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[int, int](100)
+	c := NewSieveCache[int, int](100)
 	var wg sync.WaitGroup
 	for i := range 100 {
 		wg.Go(func() {
@@ -248,17 +261,17 @@ func TestLRFUCache_Concurrent(t *testing.T) {
 	assert.LessOrEqual(t, c.Len(), 100)
 }
 
-func TestLRFUCache_Cap(t *testing.T) {
+func TestSieveCache_Cap(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](42)
+	c := NewSieveCache[string, int](42)
 	assert.Equal(t, 42, c.Cap())
-	var nilCache *LRFUCache[string, int]
+	var nilCache *SieveCache[string, int]
 	assert.Equal(t, 0, nilCache.Cap())
 }
 
-func TestLRFUCache_EvictionOrder_RespectsVisited(t *testing.T) {
+func TestSieveCache_EvictionOrder_RespectsVisited(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](4)
+	c := NewSieveCache[string, int](4)
 	c.Set("a", 1) // insert order: a, b, c, d
 	c.Set("b", 2)
 	c.Set("c", 3)
@@ -277,18 +290,18 @@ func TestLRFUCache_EvictionOrder_RespectsVisited(t *testing.T) {
 	assert.True(t, okE, "e was just inserted, must survive")
 }
 
-func TestLRFUCache_DeleteAfterFlush(t *testing.T) {
+func TestSieveCache_DeleteAfterFlush(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](5)
+	c := NewSieveCache[string, int](5)
 	c.Set("a", 1)
 	c.Flush()
 	c.Delete("a") // should not panic
 	assert.Equal(t, 0, c.Len())
 }
 
-func TestLRFUCache_ReinsertAfterDelete(t *testing.T) {
+func TestSieveCache_ReinsertAfterDelete(t *testing.T) {
 	t.Parallel()
-	c := NewLRFUCache[string, int](3)
+	c := NewSieveCache[string, int](3)
 	c.Set("a", 1)
 	c.Set("b", 2)
 	c.Set("c", 3)

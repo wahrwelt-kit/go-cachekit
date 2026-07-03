@@ -163,15 +163,15 @@ func BenchmarkEscapeRedisGlob(b *testing.B) {
 	}
 }
 
-func BenchmarkLRFUCache_Set(b *testing.B) {
-	c := NewLRFUCache[string, int](1024)
+func BenchmarkSieveCache_Set(b *testing.B) {
+	c := NewSieveCache[string, int](1024)
 	for i := range b.N {
 		c.Set(strconv.Itoa(i%2048), i)
 	}
 }
 
-func BenchmarkLRFUCache_Get_Hit(b *testing.B) {
-	c := NewLRFUCache[string, int](1024)
+func BenchmarkSieveCache_Get_Hit(b *testing.B) {
+	c := NewSieveCache[string, int](1024)
 	for i := range 1024 {
 		c.Set(strconv.Itoa(i), i)
 	}
@@ -181,15 +181,15 @@ func BenchmarkLRFUCache_Get_Hit(b *testing.B) {
 	}
 }
 
-func BenchmarkLRFUCache_Get_Miss(b *testing.B) {
-	c := NewLRFUCache[string, int](1024)
+func BenchmarkSieveCache_Get_Miss(b *testing.B) {
+	c := NewSieveCache[string, int](1024)
 	for b.Loop() {
 		c.Get("miss")
 	}
 }
 
-func BenchmarkLRFUCache_SetEviction(b *testing.B) {
-	c := NewLRFUCache[int, int](256)
+func BenchmarkSieveCache_SetEviction(b *testing.B) {
+	c := NewSieveCache[int, int](256)
 	for i := range 256 {
 		c.Set(i, i)
 	}
@@ -199,8 +199,8 @@ func BenchmarkLRFUCache_SetEviction(b *testing.B) {
 	}
 }
 
-func BenchmarkLRFUCache_Delete(b *testing.B) {
-	c := NewLRFUCache[int, int](4096)
+func BenchmarkSieveCache_Delete(b *testing.B) {
+	c := NewSieveCache[int, int](4096)
 	for i := range 4096 {
 		c.Set(i, i)
 	}
@@ -210,8 +210,8 @@ func BenchmarkLRFUCache_Delete(b *testing.B) {
 	}
 }
 
-func BenchmarkLRFUCache_Parallel_Get(b *testing.B) {
-	c := NewLRFUCache[int, int](1024)
+func BenchmarkSieveCache_Parallel_Get(b *testing.B) {
+	c := NewSieveCache[int, int](1024)
 	for i := range 1024 {
 		c.Set(i, i)
 	}
@@ -225,8 +225,8 @@ func BenchmarkLRFUCache_Parallel_Get(b *testing.B) {
 	})
 }
 
-func BenchmarkLRFUCache_Parallel_SetGet(b *testing.B) {
-	c := NewLRFUCache[int, int](1024)
+func BenchmarkSieveCache_Parallel_SetGet(b *testing.B) {
+	c := NewSieveCache[int, int](1024)
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
@@ -240,8 +240,8 @@ func BenchmarkLRFUCache_Parallel_SetGet(b *testing.B) {
 	})
 }
 
-func BenchmarkLRFUCache_Parallel_HeavyContention(b *testing.B) {
-	c := NewLRFUCache[int, int](64)
+func BenchmarkSieveCache_Parallel_HeavyContention(b *testing.B) {
+	c := NewSieveCache[int, int](64)
 	var wg sync.WaitGroup
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

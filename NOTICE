@@ -1,0 +1,13 @@
+go-cachekit
+
+The SieveCache implementation is inspired by the SIEVE cache eviction
+algorithm and the public MIT-licensed Go implementation at:
+
+  https://github.com/guerinoni/sieve
+
+SIEVE references:
+
+  Yazhuo Zhang, Juncheng Yang, Yao Yue, Ymir Vigfusson, K. V. Rashmi.
+  "SIEVE is Simpler than LRU: an Efficient Turn-Key Eviction Algorithm
+  for Web Caches." NSDI 2024.
+

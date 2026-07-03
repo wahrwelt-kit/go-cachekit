@@ -14,8 +14,10 @@ jobs:
       - name: Vet and test
         run: |
           go mod download
+          go mod tidy -diff
           go vet ./...
           go test -race ./...
+          go test -race -tags=integration -count=1 ./...
 
   lint:
     runs-on: ubuntu-latest

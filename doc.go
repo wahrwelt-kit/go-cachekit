@@ -1,4 +1,4 @@
-// Package cachekit provides Redis-backed and in-memory caching and key-value stores
+// Package cachekit provides Redis-backed and in-memory caching and key-value stores.
 //
 // # Redis connection
 //
@@ -27,12 +27,11 @@
 // between the in-memory version check and Redis Set; if Del runs in that window, a stale value may be written back
 // Values have TTL and will expire
 //
-// # In-memory LRFU cache (LRFUCache)
+// # In-memory SIEVE-style cache (SieveCache)
 //
-// NewLRFUCache[K, V](maxSize) creates a cache using the LRFU (Lazy Recency/Frequency Update) eviction
-// algorithm with at most maxSize entries (DefaultLRFUCacheSize when maxSize <= 0)
-// LRFU achieves better hit rates than standard LRU on power-law/Zipf workloads by using
-// lazy promotion and quick demotion of unpopular items. All operations are O(1)
+// NewSieveCache[K, V](maxSize) creates a cache using SIEVE-style second-chance eviction
+// with at most maxSize entries (DefaultSieveCacheSize when maxSize <= 0).
+// This cache uses lazy promotion and quick demotion of unpopular items. All operations are O(1) amortized
 //
 //   - Get marks the entry as visited (lazy promotion) so it survives eviction. Peek returns the value without
 //     marking visited. Set inserts at the head or updates in place (marks visited). SetIfAbsent adds only if absent

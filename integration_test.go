@@ -44,7 +44,7 @@ func TestIntegration_NewRedisClient(t *testing.T) {
 
 	client, err := NewRedisClient(ctx, &RedisConfig{
 		Host:     host,
-		Port:     port.Int(),
+		Port:     int(port.Num()),
 		PoolSize: 5,
 	})
 	require.NoError(t, err)

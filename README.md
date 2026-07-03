@@ -4,7 +4,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/wahrwelt-kit/go-cachekit.svg)](https://pkg.go.dev/github.com/wahrwelt-kit/go-cachekit)
 [![Go Report Card](https://goreportcard.com/badge/github.com/wahrwelt-kit/go-cachekit)](https://goreportcard.com/report/github.com/wahrwelt-kit/go-cachekit)
 
-Redis-backed JSON cache, in-memory LRFU cache, TTL single-value cache, key-value and pub/sub helpers.
+Redis-backed JSON cache, in-memory SIEVE-style cache, TTL single-value cache, key-value and pub/sub helpers.
 
 ## Install
 
@@ -26,14 +26,16 @@ import "github.com/wahrwelt-kit/go-cachekit"
 - **Set** - marshal value as JSON, set with ttl
 - **DeleteByPrefix** - scan prefix\*, unlink keys, forget singleflight
 
-### LRFUCache (in-memory LRFU eviction)
+### SieveCache (in-memory SIEVE-style eviction)
 
-- **NewLRFUCache[K,V](maxSize)** - maxSize or DefaultLRFUCacheSize (100) if ≤ 0
+- **NewSieveCache[K,V](maxSize)** - maxSize or DefaultSieveCacheSize (100) if ≤ 0
 - **Get** - returns value and marks entry as visited (lazy promotion)
 - **Peek** - returns value without marking visited
 - **Set** - insert or update; evicts unvisited entries when full
 - **SetIfAbsent** - insert only if key does not exist
 - **Delete**, **Flush**, **Len**, **Cap**
+
+SieveCache is intentionally the only in-memory eviction policy in this package. It keeps cache hits cheap by setting a visited bit instead of moving nodes, and it quickly removes one-off entries during eviction. That makes it a practical default for skewed workloads with a small hot set mixed with occasional scans.
 
 ### CachedValue (single key, TTL, singleflight)
 
@@ -67,10 +69,14 @@ val, err := cachekit.GetOrLoad(c, ctx, "user:1", 5*time.Minute, func(ctx context
     return db.GetUser(ctx, 1)
 })
 
-// LRFU cache - better hit rate for skewed workloads than LRU
-lrfu := cachekit.NewLRFUCache[string, string](1000)
-lrfu.Set("k", "v")
-if v, ok := lrfu.Get("k"); ok {
+// SIEVE-style cache - lazy promotion and quick demotion for skewed workloads
+sieve := cachekit.NewSieveCache[string, string](1000)
+sieve.Set("k", "v")
+if v, ok := sieve.Get("k"); ok {
     // v == "v", entry is now marked visited and survives eviction
 }
 ```
+
+## Attribution
+
+SieveCache is inspired by the SIEVE cache eviction algorithm and the MIT-licensed Go implementation at [guerinoni/sieve](https://github.com/guerinoni/sieve). See [NOTICE](NOTICE).
