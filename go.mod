@@ -3,7 +3,7 @@ module github.com/wahrwelt-kit/go-cachekit
 go 1.26.0
 
 require (
-	github.com/redis/go-redis/v9 v9.21.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.21.0
 )
