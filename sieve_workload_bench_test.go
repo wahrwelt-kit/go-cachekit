@@ -64,9 +64,10 @@ func runWorkloadBenchmark(b *testing.B, keys []int, cache workloadCache) {
 	b.Helper()
 	b.ReportAllocs()
 	var hits int
+	var iterations int
 	mask := len(keys) - 1
-	b.ResetTimer()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
+		iterations++
 		key := keys[i&mask]
 		if _, ok := cache.Get(key); ok {
 			hits++
@@ -75,8 +76,8 @@ func runWorkloadBenchmark(b *testing.B, keys []int, cache workloadCache) {
 		cache.Set(key, key)
 	}
 	b.StopTimer()
-	if b.N > 0 {
-		b.ReportMetric(float64(hits)*100/float64(b.N), "hit_pct")
+	if iterations > 0 {
+		b.ReportMetric(float64(hits)*100/float64(iterations), "hit_pct")
 	}
 }
 

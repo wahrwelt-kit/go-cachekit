@@ -88,7 +88,7 @@ func TestIntegration_Cache_GetOrLoad(t *testing.T) {
 	c := cachekit.New(rc)
 	ctx := context.Background()
 
-	val, err := cachekit.GetOrLoad(c, ctx, "test:key", time.Minute, func(_ context.Context) (map[string]int, error) {
+	val, err := c.GetOrLoad(ctx, "test:key", time.Minute, func(_ context.Context) (map[string]int, error) {
 		return map[string]int{"a": 1}, nil
 	})
 	require.NoError(t, err)

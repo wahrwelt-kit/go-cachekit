@@ -2,10 +2,12 @@ package cachekit
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,39 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
+
+var (
+	cacheDurationMarshalers = jsonv2.MarshalFunc(func(value time.Duration) ([]byte, error) {
+		return strconv.AppendInt(nil, int64(value), 10), nil
+	})
+	cacheDurationUnmarshalers = jsonv2.UnmarshalFunc(func(data []byte, value *time.Duration) error {
+		var nanoseconds int64
+		if err := jsonv2.Unmarshal(data, &nanoseconds); err != nil {
+			return err
+		}
+		*value = time.Duration(nanoseconds)
+		return nil
+	})
+	cacheJSONMarshalOptions = jsonv2.JoinOptions(
+		jsonv2.Deterministic(true),
+		jsonv2.FormatNilMapAsNull(true),
+		jsonv2.FormatNilSliceAsNull(true),
+		jsontext.EscapeForHTML(true),
+		jsonv2.WithMarshalers(cacheDurationMarshalers),
+	)
+	cacheJSONUnmarshalOptions = jsonv2.JoinOptions(
+		jsonv2.MatchCaseInsensitiveNames(true),
+		jsonv2.WithUnmarshalers(cacheDurationUnmarshalers),
+	)
+)
+
+func marshalCacheJSON(value any) ([]byte, error) {
+	return jsonv2.Marshal(value, cacheJSONMarshalOptions)
+}
+
+func unmarshalCacheJSON(data []byte, value any) error {
+	return jsonv2.Unmarshal(data, value, cacheJSONUnmarshalOptions)
+}
 
 const (
 	defaultGetOrLoadTimeout     = 30 * time.Second
@@ -447,7 +482,7 @@ func readCachedJSON[T any](c *Cache, ctx context.Context, key string) (value T, 
 			return zero, false, fmt.Errorf("cache get: unexpected value type %T", result[1])
 		}
 	}
-	if unmarshalErr := json.Unmarshal([]byte(val), &value); unmarshalErr != nil {
+	if unmarshalErr := unmarshalCacheJSON([]byte(val), &value); unmarshalErr != nil {
 		var zero T
 		return zero, false, c.deleteCorruptCacheEntry(ctx, key, unmarshalErr)
 	}
@@ -501,7 +536,7 @@ func loadAndStoreIfFresh[T any](
 		if localVersion.Load() != verBefore {
 			return data, nil
 		}
-		bytes, marshalErr := json.Marshal(data)
+		bytes, marshalErr := marshalCacheJSON(data)
 		if marshalErr != nil {
 			return nil, fmt.Errorf("cache load marshal: %w", marshalErr)
 		}
@@ -555,7 +590,13 @@ func (c *Cache) unlinkStaleValues(ctx context.Context, keys []string) error {
 // loadFn receives the request context and may respect context cancellation
 // If loadFn succeeds but Redis write-back fails, returns (loadedData, err): caller receives the data and the write-back error
 // Optional opts: WithTimeout, WithRespectCallerCancel, WithBypassOnCacheError
-func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) { //nolint:cyclop,revive // cache loading logic requires multiple branching paths
+func GetOrLoad[T any](c *Cache, ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) {
+	return c.GetOrLoad(ctx, key, ttl, loadFn, opts...)
+}
+
+// GetOrLoad returns the cached value or loads and stores it using the same mutation fences as Set and Del.
+// The package-level GetOrLoad function remains available for existing callers.
+func (c *Cache) GetOrLoad[T any](ctx context.Context, key string, ttl time.Duration, loadFn func(context.Context) (T, error), opts ...GetOrLoadOption) (T, error) { //nolint:cyclop,revive // cache loading logic requires multiple branching paths
 	var result T
 	if c == nil || c.redis == nil {
 		return result, ErrRedisNotConfigured
@@ -636,7 +677,7 @@ func (c *Cache) Set(ctx context.Context, key string, value any, ttl time.Duratio
 	if ttl <= 0 {
 		return fmt.Errorf("cache set: %w, got %v", ErrInvalidTTL, ttl)
 	}
-	bytes, err := json.Marshal(value)
+	bytes, err := marshalCacheJSON(value)
 	if err != nil {
 		return fmt.Errorf("cache set marshal: %w", err)
 	}

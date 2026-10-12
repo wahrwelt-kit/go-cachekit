@@ -11,7 +11,7 @@ import (
 )
 
 // KeyValueStore is a minimal key-value store with Get, Set, and Del
-// Get and Set use []byte for symmetric serialized payloads (e.g. json.Marshal/Unmarshal). Set requires a positive TTL
+// Get and Set use []byte for symmetric serialized payloads (e.g. jsonv2.Marshal/Unmarshal). Set requires a positive TTL
 type KeyValueStore interface {
 	// Get returns the value for key as bytes, or an error if missing or the store is unavailable
 	Get(ctx context.Context, key string) ([]byte, error)

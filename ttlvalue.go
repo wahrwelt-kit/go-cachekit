@@ -107,7 +107,11 @@ func (v *CachedValue[T]) storeFresh(value T, expiresAt time.Time) {
 	v.hasLastGood = true
 }
 
-// Get returns the cached value if present; otherwise calls load with a timeout (see WithLoadTimeout), caches the result with the configured TTL, and returns it. Concurrent calls for the same key share one load (singleflight). Returns ErrNilCachedValue if the receiver is nil, or ErrUnexpectedType on type mismatch. By default load runs with context.WithoutCancel(ctx) so it can finish even if the caller cancels; pass WithRespectCallerCancel(true) at construction to make load observe caller cancellation.
+// Get returns the cached value or shares a load with concurrent callers.
+// Each caller can stop waiting by canceling ctx. By default the shared load
+// continues with context.WithoutCancel(ctx), bounded by WithLoadTimeout.
+// WithRespectCallerCancel(true) also cancels the load when its initiating caller cancels.
+// Nil receivers return ErrNilCachedValue; invalid result types return ErrUnexpectedType.
 func (v *CachedValue[T]) Get(ctx context.Context, load func(context.Context) (T, error)) (T, error) {
 	var zero T
 	if v == nil {
@@ -119,39 +123,56 @@ func (v *CachedValue[T]) Get(ctx context.Context, load func(context.Context) (T,
 	if load == nil {
 		return zero, ErrNilLoadFunc
 	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
 	if cached, ok := v.cached(time.Now()); ok {
 		return cached, nil
 	}
-	res, err, _ := v.sf.Do(v.key, func() (any, error) {
-		if cached, ok := v.cached(time.Now()); ok {
-			return cached, nil
-		}
-		verBefore := v.version.Load()
-		baseCtx := ctx
-		if !v.respectCancel {
-			baseCtx = context.WithoutCancel(ctx)
-		}
-		loadCtx, cancel := context.WithTimeout(baseCtx, v.loadTimeout)
-		val, err := load(loadCtx)
-		cancel()
-		if err != nil {
-			return nil, err
-		}
-		v.mu.Lock()
-		if v.version.Load() == verBefore {
-			v.storeFresh(val, time.Now().Add(v.ttl))
-		}
-		v.mu.Unlock()
-		return val, nil
+	// Schedule the load before Invalidate can forget this generation.
+	v.mu.RLock()
+	verBefore := v.version.Load()
+	result := v.sf.DoChan(v.key, func() (any, error) {
+		return v.loadFresh(ctx, verBefore, load)
 	})
+	v.mu.RUnlock()
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case res := <-result:
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		if res.Err != nil {
+			return zero, res.Err
+		}
+		typed, ok := res.Val.(T)
+		if !ok && res.Val != nil {
+			return zero, ErrUnexpectedType
+		}
+		return typed, nil
+	}
+}
+
+func (v *CachedValue[T]) loadFresh(ctx context.Context, version uint64, load func(context.Context) (T, error)) (any, error) {
+	if cached, ok := v.cached(time.Now()); ok {
+		return cached, nil
+	}
+	if !v.respectCancel {
+		ctx = context.WithoutCancel(ctx)
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, v.loadTimeout)
+	defer cancel()
+	value, err := load(loadCtx)
 	if err != nil {
-		return zero, err
+		return nil, err
 	}
-	typed, ok := res.(T)
-	if !ok && res != nil {
-		return zero, ErrUnexpectedType
+	v.mu.Lock()
+	if v.version.Load() == version {
+		v.storeFresh(value, time.Now().Add(v.ttl))
 	}
-	return typed, nil
+	v.mu.Unlock()
+	return value, nil
 }
 
 // GetStale returns the in-TTL value if present; otherwise the last successfully loaded value (survives TTL expiry); otherwise (zero, false). Does not call load. Nil receiver returns (zero, false).

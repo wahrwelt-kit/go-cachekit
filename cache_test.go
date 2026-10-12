@@ -2,7 +2,6 @@ package cachekit
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -54,7 +53,7 @@ func TestGetOrLoad_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
 	data := map[string]int{"x": 1}
-	bytes, _ := json.Marshal(data)
+	bytes, _ := marshalCacheJSON(data)
 	expectFreshValue(mock, "key", string(bytes))
 
 	loadCalled := false
@@ -86,6 +85,22 @@ func TestGetOrLoad_CacheMiss(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestCacheGetOrLoadMethodAPI(t *testing.T) {
+	t.Parallel()
+	client, mock := newRedisClientMock(t)
+	c := New(client)
+	expectFreshValueMiss(mock, "method")
+	expectMutationSnapshot(mock, "method")
+	expectLoadedValueWrite(mock, "method", []byte(`{"n":3}`)).SetVal(1)
+
+	got, err := c.GetOrLoad(context.Background(), "method", time.Minute, func(context.Context) (map[string]int, error) {
+		return map[string]int{"n": 3}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"n": 3}, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestDel(t *testing.T) {
 	t.Parallel()
 	client, mock := newRedisClientMock(t)
@@ -108,6 +123,56 @@ func TestSet(t *testing.T) {
 	err := c.Set(ctx, "k", struct{ N int }{10}, time.Second)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSet_JSONV2WireCompatibility(t *testing.T) {
+	t.Parallel()
+	client, mock := newRedisClientMock(t)
+	c := New(client)
+	ttl := time.Minute
+
+	expectSetValue(mock, "nil-map", []byte("null"), ttl).SetVal(1)
+	expectSetValue(mock, "nil-slice", []byte("null"), ttl).SetVal(1)
+	expectSetValue(mock, "ordered", []byte(`{"a":1,"z":2}`), ttl).SetVal(1)
+	require.NoError(t, c.Set(context.Background(), "nil-map", map[string]int(nil), ttl))
+	require.NoError(t, c.Set(context.Background(), "nil-slice", []string(nil), ttl))
+	require.NoError(t, c.Set(context.Background(), "ordered", map[string]int{"z": 2, "a": 1}, ttl))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCacheJSONDurationAndOmitEmpty(t *testing.T) {
+	t.Parallel()
+	type durationFields struct {
+		Timeout time.Duration `json:"timeout,omitempty"`
+		Zero    time.Duration `json:"zero,omitzero"`
+	}
+
+	encoded, err := marshalCacheJSON(durationFields{Timeout: 1500 * time.Millisecond})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"timeout":1500000000}`, string(encoded))
+
+	var decoded time.Duration
+	require.NoError(t, unmarshalCacheJSON([]byte("1500000000"), &decoded))
+	assert.Equal(t, 1500*time.Millisecond, decoded)
+
+	encoded, err = marshalCacheJSON(durationFields{})
+	require.NoError(t, err)
+	assert.Equal(t, `{"timeout":0}`, string(encoded))
+}
+
+func TestCacheJSONMatchesFieldNamesIgnoringCaseAndSeparators(t *testing.T) {
+	t.Parallel()
+	type record struct {
+		Value string `json:"value"`
+	}
+
+	var got record
+	require.NoError(t, unmarshalCacheJSON([]byte(`{"VALUE":"cached"}`), &got))
+	assert.Equal(t, "cached", got.Value)
+
+	got = record{}
+	require.NoError(t, unmarshalCacheJSON([]byte(`{"val_ue":"separator match"}`), &got))
+	assert.Equal(t, "separator match", got.Value)
 }
 
 func TestDeleteByPrefix(t *testing.T) {
@@ -262,6 +327,33 @@ func TestGetOrLoad_UnmarshalError(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unmarshal")
+}
+
+func TestGetOrLoad_RejectsDuplicateNamesAndInvalidUTF8(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "duplicate names", payload: `{"value":1,"value":2}`},
+		{name: "invalid UTF-8", payload: string([]byte{'{', '"', 'v', '"', ':', '"', 0xff, '"', '}'})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client, mock := newRedisClientMock(t)
+			c := New(client)
+			expectFreshValue(mock, "strict", tt.payload)
+			expectDelKeys(mock, "strict").SetVal(2)
+
+			_, err := c.GetOrLoad(context.Background(), "strict", time.Minute, func(context.Context) (map[string]int, error) {
+				t.Fatal("load function must not run for a corrupt cache hit")
+				return nil, nil
+			})
+			require.ErrorContains(t, err, "cache get unmarshal")
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestSet_EmptyKey(t *testing.T) {

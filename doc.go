@@ -10,7 +10,7 @@
 //
 // New returns a Cache that uses the given *redis.Client. Optional CacheOptions (e.g. WithMaxVersionMapEntries) configure the cache. Values are serialized as JSON. Cache keys must be non-empty
 //
-//   - GetOrLoad[T]: package-level function (not a method) because Go has no generic methods on types. Call as GetOrLoad(c, ctx, key, ttl, loadFn, opts...). Returns the value for key from Redis, or runs loadFn(ctx), stores the result with ttl, and returns it
+//   - GetOrLoad[T]: Cache method. The package-level GetOrLoad(c, ctx, key, ttl, loadFn, opts...) wrapper remains available for existing callers. It returns the value for key from Redis, or runs loadFn(ctx), stores the result with ttl, and returns it
 //     loadFn receives the request context and may respect context cancellation. Uses singleflight so concurrent
 //     requests for the same key run loadFn once. Use each key with exactly one type T; using the same key with
 //     different T causes a type error. ttl must be positive

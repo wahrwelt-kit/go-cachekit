@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +122,7 @@ func FuzzGetOrLoadJSONCacheHit(f *testing.F) {
 			payload = payload[:fuzzMaxStringLen]
 		}
 		var decoded map[string]any
-		unmarshalErr := json.Unmarshal([]byte(payload), &decoded)
+		unmarshalErr := unmarshalCacheJSON([]byte(payload), &decoded)
 		client, mock := newRedisClientMock(t)
 		c := New(client)
 		expectFreshValue(mock, "k", payload)

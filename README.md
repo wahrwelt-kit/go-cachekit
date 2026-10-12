@@ -6,7 +6,11 @@
 
 Redis-backed JSON cache, in-memory SIEVE-style cache, TTL single-value cache, key-value and pub/sub helpers.
 
+Cache JSON uses `encoding/json/v2`. Nil maps and slices remain `null`, map keys are encoded deterministically, and cache reads match field names without case sensitivity. V2 matching also treats `_` and `-` as separators. `time.Duration` stays an integer nanosecond value. Duplicate names and invalid UTF-8 fail cache reads. V2 `omitempty` checks JSON emptiness; use `omitzero` when zero numeric or duration values should be omitted.
+
 ## Install
+
+Requires Go 1.27.2 or later.
 
 ```bash
 go get github.com/wahrwelt-kit/go-cachekit
@@ -21,7 +25,7 @@ import "github.com/wahrwelt-kit/go-cachekit"
 ### Cache (Redis JSON + singleflight)
 
 - **New(client)** - build Cache from go-redis Client
-- **GetOrLoad[T]** - get from Redis or call loadFn, store with ttl through a Lua exact/prefix mutation-fence check, return; singleflight per key and mutation generation; optional `WithBypassOnCacheError(true)` for cache-aside degradation
+- **cache.GetOrLoad[T]** (also available as `GetOrLoad[T](cache, ...)`) - get from Redis or call loadFn, store with ttl through a Lua exact/prefix mutation-fence check, return; singleflight per key and mutation generation; optional `WithBypassOnCacheError(true)` for cache-aside degradation
 - **Del** - delete keys and advance each key fence
 - **Set** - marshal value as JSON, set with ttl
 - **DeleteByPrefix** - advance the prefix fence, scan prefix\*, unlink stale keys and cache tokens without deleting fresh post-fence writes
@@ -41,10 +45,11 @@ SieveCache is intentionally the only in-memory eviction policy in this package. 
 
 - **NewCachedValue[T](key, ttl)** - one key, TTL + singleflight, returns error on invalid input
 - **MustNewCachedValue[T](key, ttl)** - panic-on-error variant for static configuration
-- **Get(ctx, load)** - cached or load(ctx), then cache
+- **Get(ctx, load)** - return cached data or share a load; canceled callers stop waiting independently
 - **GetStale** - return in-TTL value or the last successfully loaded stale entry without loading
-- **Invalidate** - delete, forget singleflight, and clear the stale entry
-- **WithRespectCallerCancel(true)** - make load observe caller cancellation; default lets load finish and refresh the cache
+- **Invalidate** - clear cached/stale data and start a new generation; older loads cannot overwrite it
+- **WithRespectCallerCancel(true)** - cancel the shared load with its initiating caller; default lets it continue
+- **WithLoadTimeout(duration)** - bound the load context (default 30s); the loader must honor cancellation
 
 ### Redis client
 

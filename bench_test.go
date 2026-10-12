@@ -2,7 +2,6 @@ package cachekit
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"sync"
@@ -43,14 +42,20 @@ func BenchmarkGetOrLoad_CacheHit(b *testing.B) {
 	c := New(client)
 	ctx := context.Background()
 	data := map[string]int{"x": 1}
-	bytes, _ := json.Marshal(data)
-	for range b.N {
-		expectFreshValue(mock, "key", string(bytes))
-	}
+	bytes, _ := marshalCacheJSON(data)
 	for b.Loop() {
-		_, _ = GetOrLoad(c, ctx, "key", time.Minute, func(context.Context) (map[string]int, error) {
+		b.StopTimer()
+		expectFreshValue(mock, "key", string(bytes))
+		b.StartTimer()
+		got, err := GetOrLoad(c, ctx, "key", time.Minute, func(context.Context) (map[string]int, error) {
 			return nil, nil
 		})
+		if err != nil {
+			b.Fatalf("GetOrLoad cache hit: %v", err)
+		}
+		if len(got) != 1 || got["x"] != data["x"] {
+			b.Fatalf("GetOrLoad cache hit = %#v, want %#v", got, data)
+		}
 	}
 }
 
@@ -58,18 +63,22 @@ func BenchmarkGetOrLoad_CacheMiss(b *testing.B) {
 	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
+		b.StopTimer()
 		key := fmt.Sprintf("key-%d", i)
 		expectFreshValueMiss(mock, key)
 		expectMutationSnapshot(mock, key)
 		expectLoadedValueWrite(mock, key, []byte(`{"x":1}`)).SetVal(1)
-	}
-	b.ResetTimer()
-	for i := range b.N {
-		key := fmt.Sprintf("key-%d", i)
-		_, _ = GetOrLoad(c, ctx, key, time.Minute, func(context.Context) (map[string]int, error) {
+		b.StartTimer()
+		got, err := GetOrLoad(c, ctx, key, time.Minute, func(context.Context) (map[string]int, error) {
 			return map[string]int{"x": 1}, nil
 		})
+		if err != nil {
+			b.Fatalf("GetOrLoad cache miss: %v", err)
+		}
+		if len(got) != 1 || got["x"] != 1 {
+			b.Fatalf("GetOrLoad cache miss = %#v, want map[x:1]", got)
+		}
 	}
 }
 
@@ -77,11 +86,13 @@ func BenchmarkCacheSet(b *testing.B) {
 	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
-	for range b.N {
-		expectSetValue(mock, "key", []byte(`42`), time.Minute).SetVal(1)
-	}
 	for b.Loop() {
-		_ = c.Set(ctx, "key", 42, time.Minute)
+		b.StopTimer()
+		expectSetValue(mock, "key", []byte(`42`), time.Minute).SetVal(1)
+		b.StartTimer()
+		if err := c.Set(ctx, "key", 42, time.Minute); err != nil {
+			b.Fatalf("Cache.Set: %v", err)
+		}
 	}
 }
 
@@ -89,11 +100,13 @@ func BenchmarkCacheDel(b *testing.B) {
 	client, mock := newRedisClientMock(b)
 	c := New(client)
 	ctx := context.Background()
-	for range b.N {
-		expectDelKeys(mock, "key").SetVal(2)
-	}
 	for b.Loop() {
-		_ = c.Del(ctx, "key")
+		b.StopTimer()
+		expectDelKeys(mock, "key").SetVal(2)
+		b.StartTimer()
+		if err := c.Del(ctx, "key"); err != nil {
+			b.Fatalf("Cache.Del: %v", err)
+		}
 	}
 }
 
@@ -110,8 +123,7 @@ func BenchmarkCachedValue_Get_Miss(b *testing.B) {
 	v := MustNewCachedValue[int]("k", time.Nanosecond)
 	ctx := context.Background()
 	time.Sleep(5 * time.Millisecond)
-	b.ResetTimer()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		v.Invalidate()
 		_, _ = v.Get(ctx, func(context.Context) (int, error) { return i, nil })
 	}
@@ -159,7 +171,7 @@ func BenchmarkEscapeRedisGlob(b *testing.B) {
 
 func BenchmarkSieveCache_Set(b *testing.B) {
 	c := NewSieveCache[string, int](1024)
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		c.Set(strconv.Itoa(i%2048), i)
 	}
 }
@@ -169,8 +181,7 @@ func BenchmarkSieveCache_Get_Hit(b *testing.B) {
 	for i := range 1024 {
 		c.Set(strconv.Itoa(i), i)
 	}
-	b.ResetTimer()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		c.Get(strconv.Itoa(i % 1024))
 	}
 }
@@ -187,8 +198,7 @@ func BenchmarkSieveCache_SetEviction(b *testing.B) {
 	for i := range 256 {
 		c.Set(i, i)
 	}
-	b.ResetTimer()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		c.Set(256+i, i)
 	}
 }
@@ -198,8 +208,7 @@ func BenchmarkSieveCache_Delete(b *testing.B) {
 	for i := range 4096 {
 		c.Set(i, i)
 	}
-	b.ResetTimer()
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		c.Delete(i % 4096)
 	}
 }
